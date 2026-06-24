@@ -1,0 +1,15 @@
+{
+  "name": "hyperpower",
+  "owner": {
+    "name": "MisTraleuh",
+    "url": "https://github.com/MisTraleuh"
+  },
+  "plugins": [
+    {
+      "name": "hyperpower",
+      "source": "./",
+      "description": "Claude + Codex debate-and-build workflows, surfaced as one live table inside Claude Code.",
+      "version": "0.0.1"
+    }
+  ]
+}

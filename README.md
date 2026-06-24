@@ -51,16 +51,32 @@ isn't on the PATH, the workflow degrades to Claude-only automatically.
 - **Optional:** the [Codex CLI](https://github.com/openai/codex) on your PATH for
   the Claude ↔ Codex debate. Without it, everything still works, Claude-only.
 
-## Install (local)
+## Install
+
+This repo is **both** a plugin and its own marketplace (`.claude-plugin/marketplace.json`).
+From a Claude Code session:
 
 ```bash
-# from a Claude Code session, add this folder as a local plugin marketplace:
-/plugin marketplace add /Users/nathancatalan/Desktop/Perso/hyperpower
-/plugin install hyperpower
+# 1. add the marketplace (GitHub repo URL — relative paths resolve over git)
+/plugin marketplace add https://github.com/MisTraleuh/hyperpower
+# 2. install the plugin from it
+/plugin install hyperpower@hyperpower
 ```
 
-(Exact plugin-install commands depend on your Claude Code version — see
-`/plugin` and the plugins docs.)
+If you already added it before this file existed, refresh first:
+
+```bash
+/plugin marketplace update hyperpower
+```
+
+Local clone alternative:
+
+```bash
+/plugin marketplace add /Users/nathancatalan/Desktop/Perso/hyperpower
+/plugin install hyperpower@hyperpower
+```
+
+(Exact commands can vary by Claude Code version — see `/plugin`.)
 
 ## Roadmap / upgrade path
 
