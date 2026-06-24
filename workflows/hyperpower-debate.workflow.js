@@ -42,20 +42,23 @@ let allowCodex = false
 let codexModel = (args && typeof args === 'object' && args.codexModel) ? String(args.codexModel) : 'gpt-5.5'
 function codexPrompt(body) {
   return [
-    'You drive the Codex CLI headlessly and relay ONE concise line. You are a DUMB PIPE,',
-    'NOT an investigator. Do EXACTLY these steps and NOTHING else — do NOT read ~/.claude,',
-    'do NOT tail logs, do NOT explore the repo, do NOT run bare `codex` (it steals the TTY).',
+    'You drive the Codex CLI headlessly and relay its answer FAITHFULLY. You are a PIPE',
+    'for Codex, NOT an investigator. Do EXACTLY these steps — do NOT read ~/.claude, do',
+    'NOT tail logs, do NOT explore the repo, do NOT run bare `codex` (it steals the TTY).',
     '  1. if `command -v codex` fails -> return {"error":"codex-not-installed"} and stop.',
     '  2. Write the BODY below to a temp file with the Write tool, e.g. /tmp/codex-in-<rand>.txt.',
-    '  3. Run EXACTLY this one Bash (leave its full output visible — that is the drill-in detail):',
+    '  3. Run EXACTLY this one Bash (leave its FULL output visible — it IS Codex\'s trace):',
     '       O=/tmp/codex-out-<rand>.txt',
     '       codex exec --skip-git-repo-check --sandbox read-only --ephemeral --color never \\',
     '         -m ' + codexModel + ' -o "$O" < /tmp/codex-in-<rand>.txt 2>&1',
     '       echo "===CODEX FINAL==="; cat "$O"',
-    '  4. The text after "===CODEX FINAL===" is Codex\'s clean answer. Return exactly ONE line:',
-    '       codex(' + codexModel + '): <that answer, trimmed to the essentials>',
-    '     If a JSON schema is required, fill it from that answer with tight strings.',
-    '     NEVER paste the full transcript into your answer — it is already visible from step 3.',
+    '  4. The text after "===CODEX FINAL===" is Codex\'s answer. Relay it FAITHFULLY — this',
+    '     is the trace the user wants to SEE, so do NOT shrink it to one line:',
+    '     - If a JSON schema is required: put Codex\'s COMPLETE reasoning/answer VERBATIM in',
+    '       the `reasoning` field (keep its substance, do not summarize it away), then fill',
+    '       the structured fields (objections / agree / etc.) FROM that same answer.',
+    '     - If no schema: return Codex\'s full answer, prefixed with "codex(' + codexModel + '): ".',
+    '     Represent Codex\'s actual thinking — never substitute your own opinion for Codex\'s.',
     '',
     '--- BODY FOR CODEX ---',
     body,
@@ -136,10 +139,11 @@ const PLAN_SCHEMA = {
   properties: { plan: { type: 'string', description: 'The step-by-step plan' } },
 }
 const CRITIQUE_SCHEMA = {
-  type: 'object', additionalProperties: false, required: ['agree', 'objections'],
+  type: 'object', additionalProperties: false, required: ['agree', 'objections', 'reasoning'],
   properties: {
     agree: { type: 'boolean' },
     objections: { type: 'array', items: { type: 'string' } },
+    reasoning: { type: 'string', description: "Codex's full critique/analysis VERBATIM — the visible trace of what Codex actually argued" },
     error: { type: 'string' },
   },
 }
@@ -156,7 +160,10 @@ log(renderBar(0, agentsTotal) + '  0/' + agentsTotal + ' agents · starting')
 // --- Plan ------------------------------------------------------------------
 phase('Plan')
 let plan = (await claude(
-  'Draft a concise, numbered plan to investigate/solve this task. No code yet.\n\n' + task +
+  'Draft a rigorous, numbered plan to solve this task — good enough to survive an ' +
+  'adversarial review by a second engine. For each step be specific (what, where, why); ' +
+  'call out the key risks, edge cases, and assumptions, and how you would verify success. ' +
+  'No code yet, but no hand-waving either.\n\n' + task +
   FINAL_TEXT_NOTE,
   'draft-plan', 'Plan', PLAN_SCHEMA
 )).plan
@@ -192,10 +199,14 @@ if (allowCodex) {
       break
     }
     let objections = critique.objections || []
+    const reasoning = (critique.reasoning || '').trim()
+    // Surface Codex's actual trace in the live log so the debate is visible, not silent.
+    log('Codex r' + round + ' · ' + objections.length + ' objection(s)' +
+      (reasoning ? ' — ' + reasoning.replace(/\s+/g, ' ').slice(0, 140) : ''))
     // Only accept agreement once at least one revision has actually happened.
     if ((critique.agree || objections.length === 0) && revisions >= MIN_REVISIONS) {
       log('Codex agrees after round ' + round + ' (post-revision).')
-      debateLog.push({ round, agreed: true })
+      debateLog.push({ round, agreed: true, reasoning })
       break
     }
     // No objections but we still owe a revision: make Claude self-harden the plan
@@ -205,11 +216,16 @@ if (allowCodex) {
       objections = ['No explicit objection from Codex — proactively harden the plan: ' +
         'tighten the weakest step, add an edge case you may have missed, and state one risk.']
     }
-    debateLog.push({ round, objections })
+    debateLog.push({ round, objections, reasoning })
+    // Feed Codex's FULL reasoning (not just bullet objections) into the revision, so the
+    // revised plan genuinely integrates Codex's thinking instead of pattern-matching bullets.
     plan = (await claude(
-      'Codex raised these objections. Address EACH (accept/reject + one-line reason), ' +
-      'then return the REVISED plan.\n\nOBJECTIONS:\n- ' + objections.join('\n- ') +
-      '\n\nCURRENT PLAN:\n' + plan + FINAL_TEXT_NOTE,
+      'Codex (a second, independent engine) critiqued your plan. Engage with it seriously.\n\n' +
+      (reasoning ? "CODEX'S FULL REASONING:\n" + reasoning + '\n\n' : '') +
+      'CONCRETE OBJECTIONS:\n- ' + objections.join('\n- ') + '\n\n' +
+      'Address EACH objection (accept or reject, with a one-line reason), incorporate what is ' +
+      'right, push back on what is wrong, and return a genuinely STRONGER revised plan — not a ' +
+      'cosmetic edit.\n\nCURRENT PLAN:\n' + plan + FINAL_TEXT_NOTE,
       'revise r' + round, 'Debate', PLAN_SCHEMA
     )).plan
     revisions++
@@ -231,11 +247,15 @@ let codexReview = null
 if (codexAvailable) {
   log('Review: Codex is auditing the result (read-only)…')
   codexReview = await codex(
-    'Review this work against the plan. Flag correctness bugs, missed edge cases, or ' +
-    'unsupported claims, with file:line where possible.\n\nPLAN:\n' + plan +
+    'Review this work against the plan THOROUGHLY. Flag correctness bugs, missed edge ' +
+    'cases, or unsupported claims, with file:line where possible. Give your full reasoning ' +
+    '— this review is shown to the user as Codex\'s trace.\n\nPLAN:\n' + plan +
     '\n\nWORK:\n' + JSON.stringify(build),
     'review', 'Review'
   )
+  if (typeof codexReview === 'string' && codexReview.trim()) {
+    log('Codex review · ' + codexReview.replace(/\s+/g, ' ').slice(0, 160))
+  }
 }
 const verdict = await claude(
   'Reconcile your work with Codex\'s review. State the final answer, list which Codex ' +

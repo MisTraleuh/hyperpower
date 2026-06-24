@@ -108,7 +108,7 @@ Reading it:
 - **Base phases that haven't started yet** (Plan / Build / Review always run) show a
   dim `… <phase> pending` placeholder — never a fabricated agent with fake tokens.
 
-Run it in a **separate pane** (e.g. a cmux split) next to your Claude session:
+Run it in a **separate pane** (e.g. a tmux split) next to your Claude session:
 
 ```
 hyperpower-progress           # auto-attach to the most recent active run
@@ -167,7 +167,7 @@ If you already added it before this file existed, refresh first:
 Local clone alternative:
 
 ```bash
-/plugin marketplace add /Users/nathancatalan/Desktop/Perso/hyperpower
+/plugin marketplace add /Users/nathan/Desktop/Perso/hyperpower
 /plugin install hyperpower@hyperpower
 ```
 
@@ -181,3 +181,6 @@ Local clone alternative:
   the UX (table, debate, flag); AgentMesh provides the coordination primitives.
 - `--rounds N` to cap/extend the debate.
 - An arbiter node when Claude and Codex can't converge.
+
+<!-- hyperpower: dummy no-op marker (cosmetic; safe to remove) -->
+
