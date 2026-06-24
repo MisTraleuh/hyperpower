@@ -21,13 +21,18 @@ Codex headlessly and relay its output verbatim.
 1. If `command -v codex` fails → return exactly `{"error":"codex-not-installed"}` and stop.
 2. Use the **Write** tool to save the prompt you were given to a unique temp file,
    e.g. `/tmp/codex-prompt-<random>.txt`.
-3. Run, capturing output:
+3. Run this, and LEAVE THE OUTPUT VISIBLE (it is the full Codex transcript — the
+   user drills into this node to see exactly what Codex did, incl. commands it ran):
    ```bash
-   codex exec --skip-git-repo-check --sandbox read-only --ephemeral < /tmp/codex-prompt-<random>.txt 2>&1
+   L=/tmp/codex-last-<random>.txt
+   codex exec --skip-git-repo-check --sandbox read-only --ephemeral --color never \
+     -o "$L" < /tmp/codex-prompt-<random>.txt 2>&1
+   echo "--- CLEAN FINAL ---"; cat "$L"
    ```
-   Optional: `-m <model>` to pin a model, `-C <dir>` to point Codex at the repo
-   (by default it uses the current working directory).
-4. Codex prints a header banner, then its answer, then a `tokens used` footer.
-   Return **only Codex's substantive answer** (strip the banner/footer). Do not add
-   your own opinions or "improve" it — keep the (codex) voice distinct so the two
-   agents can genuinely disagree.
+   `-o` writes Codex's clean final message (no banner/footer). Optional: `-m <model>`,
+   `-C <dir>` to point Codex at the repo, or `--json` for a machine-readable stream.
+4. Return a **CONCISE** result — ONE short line, never the transcript (it's already
+   visible above for drill-in). Read Codex's model and token count from the banner/
+   footer. Shape: `codex(<model>, <Ntok>): <clean final, trimmed to essentials>`.
+   Don't add your own opinions — keep the (codex) voice distinct so the two agents
+   can genuinely disagree.

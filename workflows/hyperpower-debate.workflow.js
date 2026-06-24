@@ -12,8 +12,6 @@ export const meta = {
 // --- args (robust: accepts object, JSON string, or plain string) -----------
 let task = 'No task provided'
 let allowCodex = false
-let CLAUDE_MODEL = 'claude'
-let CODEX_MODEL = 'gpt-5.5'
 ;(function parseArgs() {
   let a = args
   if (typeof a === 'string') {
@@ -22,35 +20,42 @@ let CODEX_MODEL = 'gpt-5.5'
   if (a && typeof a === 'object') {
     task = a.task || a.prompt || task
     allowCodex = !!a.allowCodex
-    if (a.claudeModel) CLAUDE_MODEL = a.claudeModel
-    if (a.codexModel) CODEX_MODEL = a.codexModel
   }
 })()
 
 // --- participants ----------------------------------------------------------
-// A (codex) node is a subagent told to run the Codex CLI HEADLESSLY and relay its
-// output. The full terminal-safety contract is inlined so it holds even if the
-// codex agent definition isn't loaded. Labels carry the model so the live table
-// reads "(codex·gpt-5.5)" / "(claude)".
+// A (codex) node is a LIGHTWEIGHT Claude proxy (haiku/low) that drives the Codex
+// CLI headlessly. The node's own badge therefore honestly shows the cheap proxy
+// model; Codex's REAL model (e.g. gpt-5.5) is reported inside the node's output.
+// The full Codex transcript stays VISIBLE in the node (drill-in to see what Codex
+// actually ran); the returned value is a tight one-liner.
 function codexPrompt(body) {
   return [
-    'You are a headless proxy for the Codex CLI — NOT Claude. Relay ONLY Codex output.',
+    'You are a LIGHTWEIGHT headless proxy for the Codex CLI — NOT Claude. Be cheap and fast.',
     'SAFETY (a past version hijacked the user terminal — never repeat it):',
-    '  - never run bare `codex` (interactive); ALWAYS `codex exec`.',
-    '  - ALWAYS feed the prompt from a file on stdin; never as a shell arg, never the keyboard.',
+    '  - never run bare `codex` (interactive, steals the TTY); ALWAYS `codex exec`.',
+    '  - ALWAYS feed the prompt from a FILE on stdin; never a shell arg, never the keyboard.',
     '  - keep Codex read-only.',
     'Steps:',
     '  1. if `command -v codex` fails -> return {"error":"codex-not-installed"} and stop.',
-    '  2. Write the BODY below to a unique temp file (Write tool, e.g. /tmp/codex-<rand>.txt).',
-    '  3. run: codex exec --skip-git-repo-check --sandbox read-only --ephemeral < <file> 2>&1',
-    '  4. return ONLY Codex\'s substantive answer (strip its banner/footer).',
+    '  2. Write the BODY below to a unique temp file with the Write tool, e.g. /tmp/codex-<rand>.txt.',
+    '  3. Run this Bash and LEAVE ITS OUTPUT VISIBLE — it is the full Codex transcript so the user',
+    '     can drill in and see exactly what Codex did, including any commands Codex ran:',
+    '       L=/tmp/codex-last-<rand>.txt',
+    '       codex exec --skip-git-repo-check --sandbox read-only --ephemeral --color never \\',
+    '         -o "$L" < /tmp/codex-<rand>.txt 2>&1; echo "--- CLEAN FINAL ---"; cat "$L"',
+    '  4. RETURN A CONCISE RESULT — one short line, NEVER the transcript (already visible above).',
+    '     Read Codex\'s model and token count from the transcript banner/footer. Shape:',
+    '       codex(<model>, <Ntok>): <clean final from -o, trimmed to the essentials>',
+    '     If a JSON schema is requested, fill it from the clean final and keep strings tight.',
     '',
     '--- BODY FOR CODEX ---',
     body,
   ].join('\n')
 }
 function codex(body, label, phase, schema) {
-  return agent(codexPrompt(body), { label: '(codex·' + CODEX_MODEL + ') ' + label, phase, schema })
+  // haiku/low: the proxy does trivial relay work, so its node badge stays cheap & honest.
+  return agent(codexPrompt(body), { label: '(codex) ' + label, phase, schema, model: 'haiku', effort: 'low' })
 }
 function claude(prompt, label, phase, schema) {
   return agent(prompt, { label: '(claude) ' + label, phase, schema })
@@ -86,6 +91,7 @@ if (allowCodex) {
   const MAX_ROUNDS = 3
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     phase('Debate')
+    log('Debate r' + round + ': Codex is reviewing Claude\'s plan (read-only)…')
     const critique = await codex(
       'Critique this plan. Return concrete objections, or agree.\n\nTASK:\n' + task + '\n\nPLAN:\n' + plan,
       'critique r' + round, 'Debate', CRITIQUE_SCHEMA
@@ -124,6 +130,7 @@ const build = await claude(
 phase('Review')
 let codexReview = null
 if (codexAvailable) {
+  log('Review: Codex is auditing the result (read-only)…')
   codexReview = await codex(
     'Review this work against the plan. Flag correctness bugs, missed edge cases, or ' +
     'unsupported claims, with file:line where possible.\n\nPLAN:\n' + plan +

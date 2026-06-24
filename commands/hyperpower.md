@@ -51,8 +51,13 @@ the show — launch it, let the `(claude)`/`(codex)` nodes do the work, then rep
 > interactive `codex`. If `codex` isn't on PATH, the workflow degrades to
 > Claude-only on its own — surface that, don't fail.
 
-## 3. Report
+## 3. Report — concise, NO wall of text
 
-Summarize: the final agreed plan, what the Build node found/changed (with
-file:line), and the reconciled verdict — including which Codex objections/review
-points were accepted vs rejected.
+The user hates giant paragraphs. Give a TIGHT summary, one line per point:
+- **Verdict** — one line.
+- **Plan** — the agreed plan in ≤3 bullets.
+- **Debate** — one line per round: which Codex objections were accepted vs rejected.
+- **Build** — what was found/changed, with `file:line`, in a few bullets.
+
+Point to `/workflows` for the full detail (incl. each Codex node's transcript);
+don't paste that detail into the report.
