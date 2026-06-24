@@ -1,6 +1,6 @@
 ---
 name: codex
-description: Codex proxy. Drives the Codex CLI (`codex exec`) and returns ONLY what Codex produced. Use as the (codex) participant in mesh workflows and debates.
+description: Codex proxy. Drives the Codex CLI (`codex exec`) and returns ONLY what Codex produced. Use as the (codex) participant in hyperpower workflows and debates.
 tools: Bash, Read, Grep, Glob
 ---
 

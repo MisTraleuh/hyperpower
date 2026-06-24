@@ -1,5 +1,5 @@
 export const meta = {
-  name: 'mesh-debate',
+  name: 'hyperpower-debate',
   description: 'Claude and Codex debate a plan, then implement and cross-review — one live table.',
   phases: [
     { title: 'Plan',      detail: 'Claude drafts an initial plan' },

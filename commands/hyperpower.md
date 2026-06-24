@@ -3,7 +3,7 @@ description: Run a Claude+Codex debate-and-build workflow on a task (live table)
 argument-hint: [task] [--codex|--no-codex]
 ---
 
-The user invoked `/mesh`. The task is:
+The user invoked `/hyperpower`. The task is:
 
 $ARGUMENTS
 
@@ -30,7 +30,7 @@ Think hard (ultrathink) and follow this procedure exactly.
 
 Call the **Workflow** tool with:
 
-- `scriptPath`: `${CLAUDE_PLUGIN_ROOT}/workflows/mesh-debate.workflow.js`
+- `scriptPath`: `${CLAUDE_PLUGIN_ROOT}/workflows/hyperpower-debate.workflow.js`
 - `args`: `{ "task": "<the cleaned task text, flags stripped>", "allowCodex": <true|false> }`
 
 This renders the live table — phases **Plan → Debate → Implement → Review** with
