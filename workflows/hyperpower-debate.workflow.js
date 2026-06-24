@@ -26,11 +26,19 @@ let allowCodex = false
 // --- participants ----------------------------------------------------------
 // A (codex) node is a Claude subagent that drives the Codex CLI headlessly. Its
 // LABEL carries the real Codex model — "(codex · gpt-5.5)" — pinned via `-m`, so
-// the title is the source of truth for which engine actually thought. (The node's
-// small badge still shows the Claude proxy model — unavoidable: the node IS a
-// Claude subagent driving Codex. The label is what matters.) The proxy runs on
-// Sonnet so it reliably follows the dumb-pipe procedure instead of wandering off
-// (a weaker model went reading ~/.claude transcripts instead of running Codex).
+// the LABEL is the source of truth for which engine actually thought.
+//
+// BADGE LIMITATION (not fixable): the node's small model badge will read the
+// Claude PROXY model (Sonnet), NOT gpt-5.5. This is unavoidable — the node IS a
+// Claude subagent that shells out to Codex, so the harness badge reflects the
+// Claude model running the node. Switching to agentType:'hyperpower:codex' would
+// NOT change this (still a Claude model under the hood) and would drop the inline
+// dumb-pipe guardrails below — so we keep the inline prompt + model:'sonnet'. The
+// "(codex · gpt-5.5)" in the LABEL is the source of truth; the badge is cosmetic.
+//
+// The proxy runs on Sonnet so it reliably follows the dumb-pipe procedure instead
+// of wandering off (a weaker model went reading ~/.claude transcripts instead of
+// running Codex).
 let codexModel = (args && typeof args === 'object' && args.codexModel) ? String(args.codexModel) : 'gpt-5.5'
 function codexPrompt(body) {
   return [
@@ -59,12 +67,17 @@ function codexPrompt(body) {
 // Claude Code Workflow harness, which is NOT in this repo. The script only gets
 // the injected primitives `agent({label,phase,schema,model,effort})`, `phase()`,
 // `log()` and `args`. There is NO progress/detail/subtitle field on a node, and
-// the token count is auto-attached by the harness; the script never sets it.
-// So a bar literally on its OWN new row, directly under the harness-owned token
-// line, is not achievable from the plugin. What we CAN control is (a) the node's
-// LABEL text (rendered on that node's row) and (b) `log()` lines (printed under
-// the active phase). We use both: each node's label carries its own bar, and we
-// emit an overall workflow bar via log() after every completed agent.
+// the model badge → token count zone (the gap between the model name and "k tok")
+// is drawn entirely by the harness; the script cannot inject text there.
+//
+// What we CAN control is (a) the node's LABEL text and (b) `log()` lines (printed
+// under the active phase). We deliberately do NOT put a per-node bar in the label:
+//   - it freezes at 0% (the label is set once at agent-creation and never updated,
+//     so a node's bar can never show progress — it is a lie); and
+//   - it lengthens the label, which truncates the collapsed-Phases view.
+// So the ONLY bar we draw is the OVERALL workflow bar, emitted via `log()` after
+// each agent finishes (bumpProgress). That one is honest: it advances monotonically
+// and reflects real completed/total agent counts.
 function renderBar(done, total, width = 10) {
   total = Math.max(1, total)
   const ratio = Math.max(0, Math.min(1, done / total))
@@ -90,20 +103,33 @@ function bumpProgress(nodeLabel) {
 
 function codex(body, label, phase, schema) {
   // Sonnet/low: capable enough to follow the dumb-pipe procedure without wandering.
-  // The label carries a 0%→ bar on this node's own row (the only row we control).
+  // No per-node bar in the label (it would freeze at 0% and truncate the label);
+  // the label's "(codex · <model>)" prefix is the source of truth for the engine.
   const p = agent(codexPrompt(body), {
-    label: '(codex · ' + codexModel + ') ' + label + '  ' + renderBar(0, 1),
+    label: '(codex · ' + codexModel + ') ' + label,
     phase, schema, model: 'sonnet', effort: 'low',
   })
   return Promise.resolve(p).then((r) => { bumpProgress('(codex) ' + label); return r })
 }
 function claude(prompt, label, phase, schema) {
   const p = agent(prompt, {
-    label: '(claude) ' + label + '  ' + renderBar(0, 1),
+    label: '(claude) ' + label,
     phase, schema,
   })
   return Promise.resolve(p).then((r) => { bumpProgress('(claude) ' + label); return r })
 }
+
+// Drill-in body fix: an agent whose final turn is a StructuredOutput call produces
+// an EMPTY finalText, so the harness drill-in panel for that node shows nothing.
+// We append this instruction to every schema'd prompt so the agent ALSO prints a
+// short plain-text summary as its final assistant message, populating the drill-in.
+// (Residual uncertainty: if the harness treats the StructuredOutput call as the
+// terminal turn, trailing text may be dropped; we ask for the summary to be the
+// LAST thing emitted to maximize the chance it lands.)
+const FINAL_TEXT_NOTE =
+  '\n\nIMPORTANT — after you call StructuredOutput, ALSO write a 2-4 line plain-text ' +
+  'summary as your final assistant message (the same turn is fine), so the drill-in ' +
+  'panel for this node is not empty. Keep it human-readable, no JSON.'
 
 const PLAN_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['plan'],
@@ -130,7 +156,8 @@ log(renderBar(0, agentsTotal) + '  0/' + agentsTotal + ' agents · starting')
 // --- Plan ------------------------------------------------------------------
 phase('Plan')
 let plan = (await claude(
-  'Draft a concise, numbered plan to investigate/solve this task. No code yet.\n\n' + task,
+  'Draft a concise, numbered plan to investigate/solve this task. No code yet.\n\n' + task +
+  FINAL_TEXT_NOTE,
   'draft-plan', 'Plan', PLAN_SCHEMA
 )).plan
 
@@ -143,7 +170,8 @@ if (allowCodex) {
     phase('Debate')
     log('Debate r' + round + ': Codex is reviewing Claude\'s plan (read-only)…')
     const critique = await codex(
-      'Critique this plan. Return concrete objections, or agree.\n\nTASK:\n' + task + '\n\nPLAN:\n' + plan,
+      'Critique this plan. Return concrete objections, or agree.\n\nTASK:\n' + task + '\n\nPLAN:\n' + plan +
+      FINAL_TEXT_NOTE,
       'critique r' + round, 'Debate', CRITIQUE_SCHEMA
     )
     if (!critique || critique.error) {
@@ -161,7 +189,7 @@ if (allowCodex) {
     plan = (await claude(
       'Codex raised these objections. Address EACH (accept/reject + one-line reason), ' +
       'then return the REVISED plan.\n\nOBJECTIONS:\n- ' + objections.join('\n- ') +
-      '\n\nCURRENT PLAN:\n' + plan,
+      '\n\nCURRENT PLAN:\n' + plan + FINAL_TEXT_NOTE,
       'revise r' + round, 'Debate', PLAN_SCHEMA
     )).plan
   }

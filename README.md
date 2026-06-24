@@ -8,27 +8,30 @@ nodes.
 ```
 ▌ hyperpower: refacto auth middleware                      ⠋ running   /workflows
   Plan
-    ✓ (claude) draft-plan  [██████████] 100%      12.3k tok
+    ✔ (claude) draft-plan        Opus 4.8 (1M context)   9.4k tok · 1 tool · 39s
   Debate · round 1
-    ✓ (codex)  critique r1 [██████████] 100%       8.1k tok   → 3 objections
-    ✓ (claude) revise r1   [██████████] 100%       6.4k tok   → 2 acceptées, 1 rejetée
+    ✔ (codex · gpt-5.5) critique r1   Sonnet 4.6   8.1k tok · 2 tools · 22s
+    ✔ (claude) revise r1         Opus 4.8 (1M context)   6.4k tok · 0 tools · 31s
   Debate · round 2
-    ✓ (codex)  re-critique [██████████] 100%       4.2k tok   → accord ✓
+    ✔ (codex · gpt-5.5) critique r2   Sonnet 4.6   4.2k tok · 2 tools · 18s
   Build
-    ⠙ (claude) build       [░░░░░░░░░░] 0%         running…
+    ⠙ (claude) build             Opus 4.8 (1M context)   running…
   Review
-    ○ (codex)  review      [░░░░░░░░░░] 0%         queued
-    ○ (claude) reconcile   [░░░░░░░░░░] 0%         queued
+    ○ (codex · gpt-5.5) review        queued
+    ○ (claude) reconcile         queued
   [████████░░] 83%  5/6 agents · just finished: (codex) review
 ```
 
-> The `[██████░░░░] %` bar is rendered **by the plugin**, not the harness. Each
-> node carries a bar in its **label** (the only per-node text the script controls),
-> and an **overall** workflow bar is emitted via `log()` after each agent finishes.
-> The `12.3k tok` count to the right is drawn by the Claude Code Workflow harness
-> and is out of the plugin's control — a bar on its own row beneath that harness
-> line is not something a plugin can add. See the note in
-> `workflows/hyperpower-debate.workflow.js`.
+> The **only** bar is the **overall** one on the last line — emitted by the plugin
+> via `log()` after each agent finishes. It is honest: it advances monotonically
+> and tracks real completed/total agent counts.
+>
+> There is **no per-node bar**, on purpose. The only per-node text a plugin can set
+> is the node's **label**; a label is fixed at agent-creation and never updated, so
+> a bar there would freeze at 0% (a lie) and truncate the collapsed view. The model
+> badge, the `9.4k tok · 1 tool · 39s` zone, and everything to the right of the
+> label are drawn by the Claude Code Workflow harness and are not injectable from a
+> plugin. See the note in `workflows/hyperpower-debate.workflow.js`.
 
 ## Use
 
@@ -53,6 +56,19 @@ The "allow codex" decision is remembered for the rest of the session.
 
 The `(codex)` nodes shell out to the **Codex CLI** (`codex exec`). If `codex`
 isn't on the PATH, the workflow degrades to Claude-only automatically.
+
+## Known limitations / honesty
+
+- **The `(codex)` model badge shows the Claude proxy model (e.g. Sonnet), not
+  gpt-5.5.** A `(codex)` node is a Claude subagent that drives the Codex CLI, so
+  the harness badge reflects the Claude model running the node. This is not
+  fixable from a plugin. The `(codex · gpt-5.5)` text in the node **label** is the
+  source of truth for which engine actually thought.
+- **No per-node progress bar.** The only per-node text a plugin can set is the
+  label, which is fixed at creation and never updated — a bar there would freeze
+  at 0% and truncate the collapsed view. The single **overall** bar (via `log()`)
+  is the only honest one. The token/tool/duration zone and model badge are
+  harness-drawn and cannot be modified by the plugin.
 
 ## Requirements
 
