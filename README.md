@@ -1,6 +1,6 @@
 # hyperpower — Claude + Codex, one live table
 
-A Claude Code **plugin**. You type one thing; Claude and Codex split the work,
+A Claude Code **plugin**. You type one thing; Claude and Codex divide the work,
 **debate the plan**, implement, and cross-review — surfaced two ways: the native
 `/workflows` table (with distinct `(claude)` and `(codex)` nodes), **and**
 hyperpower's own full-screen live dashboard, `bin/hyperpower-progress`, which adds
@@ -49,6 +49,48 @@ objections on the first pass (no rubber-stamping), and the plan goes through at
 least one full critique→revise cycle before any agreement is accepted.
 
 The "allow codex" decision is remembered for the rest of the session.
+
+## Native `/workflows` progress bar (binary patch)
+
+Want the bar **inside Claude Code's own `/workflows` table** (not a separate pane)?
+hyperpower can inject it directly into the native binary:
+
+- a real **animated per-agent bar** in the row gap — `[▱▱▱▱▱▱▱▱▱▱]` queued →
+  `[▰▰▰▰▱▱▱▱▱▱]` marching while running → `[▰▰▰▰▰▰▰▰▰▰]` done — placed exactly
+  between the model badge and the `9.2k tok · …` metadata;
+- a **Codex-aware model badge**: `(codex)` rows show **"Codex gpt-5.5"** instead of
+  the misleading proxy **"Sonnet 4.6"**.
+
+Claude Code ships as a Bun-compiled native binary (no plugin hook for that row), so
+this patches the binary's embedded JS. It is done safely: a **fresh-inode swap**
+(busts the macOS AMFI signature cache), a pristine **`<binary>.orig` backup**, the
+patched binary is **launch-verified** (backup restored if it won't run), and the
+patcher **auto-degrades** — if a future Claude build doesn't match, it aborts and
+leaves Claude untouched.
+
+### Install (one command)
+
+```bash
+git clone https://github.com/MisTraleuh/hyperpower && cd hyperpower
+bash tools/claude-bar/install.sh --auto
+```
+
+This patches the current Claude binary, creates a **`claude-auto`** launcher
+(`claude --dangerously-skip-permissions` — autonomous mode), and installs a
+**LaunchAgent** that re-applies the patch after each (~daily) Claude auto-update.
+Restart Claude Code, run `/hyperpower <task> --codex`, open `/workflows` → bar.
+
+| Action | Command |
+| --- | --- |
+| Patch / re-patch now | `bash tools/claude-bar/install.sh` |
+| Patch + auto-reapply on updates | `bash tools/claude-bar/install.sh --auto` |
+| Autonomous Claude (bypass perms) | `claude-auto` |
+| Revert the patch | `cp <binary>.orig <binary> && codesign -f -s - <binary>` |
+| Stop auto-reapply | `launchctl unload ~/Library/LaunchAgents/com.hyperpower.claudebar.plist` |
+
+> ⚠️ `claude-auto` bypasses **all** permission prompts — use it only for unattended
+> runs. Your normal `claude` stays permission-guarded. The patch is cosmetic +
+> reversible; it never changes how Claude executes.
 
 ## How it works
 
