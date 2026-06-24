@@ -1,33 +1,59 @@
 export const meta = {
   name: 'hyperpower-debate',
-  description: 'Claude and Codex debate a plan, then implement and cross-review — one live table.',
+  description: 'Claude and Codex debate a plan, then build and cross-review — one live table.',
   phases: [
     { title: 'Plan',      detail: 'Claude drafts an initial plan' },
     { title: 'Debate',    detail: 'Codex critiques, Claude revises, until they agree' },
-    { title: 'Implement', detail: 'Codex implements + tests; Claude writes notes' },
-    { title: 'Review',    detail: 'Claude cross-reviews the work against the plan' },
+    { title: 'Build',     detail: 'Claude implements; Codex stays read-only' },
+    { title: 'Review',    detail: 'Codex reviews the result, Claude reconciles' },
   ],
 }
 
-const task = (args && args.task) || 'No task provided'
-const allowCodex = !!(args && args.allowCodex)
+// --- args (robust: accepts object, JSON string, or plain string) -----------
+let task = 'No task provided'
+let allowCodex = false
+let CLAUDE_MODEL = 'claude'
+let CODEX_MODEL = 'gpt-5.5'
+;(function parseArgs() {
+  let a = args
+  if (typeof a === 'string') {
+    try { a = JSON.parse(a) } catch { task = a; return }
+  }
+  if (a && typeof a === 'object') {
+    task = a.task || a.prompt || task
+    allowCodex = !!a.allowCodex
+    if (a.claudeModel) CLAUDE_MODEL = a.claudeModel
+    if (a.codexModel) CODEX_MODEL = a.codexModel
+  }
+})()
 
 // --- participants ----------------------------------------------------------
-// A (codex) node is a subagent told to drive the Codex CLI and relay its output.
-// Labelling it `codex:*` makes it show up as a distinct node in the live table.
-// Once the plugin is installed you can swap the inline prompt for
-// { agentType: 'codex' } to reuse agents/codex.md.
-function codex(prompt, label, phase, schema) {
-  return agent(
-    'You are a thin proxy for the Codex CLI — NOT Claude. Run:\n' +
-    '  codex exec --skip-git-repo-check ' + JSON.stringify(prompt) + '\n' +
-    'Return ONLY what Codex produced. If `codex` is not on the PATH, return ' +
-    '{"error":"codex-not-installed"}.',
-    { label, phase, schema }
-  )
+// A (codex) node is a subagent told to run the Codex CLI HEADLESSLY and relay its
+// output. The full terminal-safety contract is inlined so it holds even if the
+// codex agent definition isn't loaded. Labels carry the model so the live table
+// reads "(codex·gpt-5.5)" / "(claude)".
+function codexPrompt(body) {
+  return [
+    'You are a headless proxy for the Codex CLI — NOT Claude. Relay ONLY Codex output.',
+    'SAFETY (a past version hijacked the user terminal — never repeat it):',
+    '  - never run bare `codex` (interactive); ALWAYS `codex exec`.',
+    '  - ALWAYS feed the prompt from a file on stdin; never as a shell arg, never the keyboard.',
+    '  - keep Codex read-only.',
+    'Steps:',
+    '  1. if `command -v codex` fails -> return {"error":"codex-not-installed"} and stop.',
+    '  2. Write the BODY below to a unique temp file (Write tool, e.g. /tmp/codex-<rand>.txt).',
+    '  3. run: codex exec --skip-git-repo-check --sandbox read-only --ephemeral < <file> 2>&1',
+    '  4. return ONLY Codex\'s substantive answer (strip its banner/footer).',
+    '',
+    '--- BODY FOR CODEX ---',
+    body,
+  ].join('\n')
+}
+function codex(body, label, phase, schema) {
+  return agent(codexPrompt(body), { label: '(codex·' + CODEX_MODEL + ') ' + label, phase, schema })
 }
 function claude(prompt, label, phase, schema) {
-  return agent(prompt, { label, phase, schema })
+  return agent(prompt, { label: '(claude) ' + label, phase, schema })
 }
 
 const PLAN_SCHEMA = {
@@ -43,11 +69,14 @@ const CRITIQUE_SCHEMA = {
   },
 }
 
+log('Task: ' + task.slice(0, 120) + (task.length > 120 ? '…' : ''))
+if (task === 'No task provided') log('WARNING: empty task — check that args was passed as a JSON object, not a string.')
+
 // --- Plan ------------------------------------------------------------------
 phase('Plan')
 let plan = (await claude(
-  'Draft a concise, numbered implementation plan for this task. No code yet.\n\n' + task,
-  'claude:draft-plan', 'Plan', PLAN_SCHEMA
+  'Draft a concise, numbered plan to investigate/solve this task. No code yet.\n\n' + task,
+  'draft-plan', 'Plan', PLAN_SCHEMA
 )).plan
 
 // --- Debate (only when Codex is allowed) ----------------------------------
@@ -58,12 +87,11 @@ if (allowCodex) {
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     phase('Debate')
     const critique = await codex(
-      'Critique this implementation plan. Return concrete objections, or agree.\n\n' +
-      'TASK:\n' + task + '\n\nPLAN:\n' + plan,
-      'codex:critique-r' + round, 'Debate', CRITIQUE_SCHEMA
+      'Critique this plan. Return concrete objections, or agree.\n\nTASK:\n' + task + '\n\nPLAN:\n' + plan,
+      'critique r' + round, 'Debate', CRITIQUE_SCHEMA
     )
     if (!critique || critique.error) {
-      log('Codex unavailable — continuing Claude-only.')
+      log('Codex unavailable (' + ((critique && critique.error) || 'no result') + ') — continuing Claude-only.')
       codexAvailable = false
       break
     }
@@ -74,35 +102,40 @@ if (allowCodex) {
       break
     }
     debateLog.push({ round, objections })
-    const revised = await claude(
-      'Codex raised these objections to your plan. Address EACH (accept or reject ' +
-      'with a one-line reason), then return the REVISED plan.\n\n' +
-      'OBJECTIONS:\n- ' + objections.join('\n- ') + '\n\nCURRENT PLAN:\n' + plan,
-      'claude:revise-r' + round, 'Debate', PLAN_SCHEMA
-    )
-    plan = revised.plan
+    plan = (await claude(
+      'Codex raised these objections. Address EACH (accept/reject + one-line reason), ' +
+      'then return the REVISED plan.\n\nOBJECTIONS:\n- ' + objections.join('\n- ') +
+      '\n\nCURRENT PLAN:\n' + plan,
+      'revise r' + round, 'Debate', PLAN_SCHEMA
+    )).plan
   }
 }
 
-// --- Implement -------------------------------------------------------------
-phase('Implement')
-const work = (await parallel([
-  () => codexAvailable
-    ? codex('Implement this plan and add tests. Return a summary of files changed ' +
-            'and test results.\n\n' + plan, 'codex:implement', 'Implement')
-    : claude('Implement this plan and add tests. Return a summary of files changed ' +
-             'and test results.\n\n' + plan, 'claude:implement', 'Implement'),
-  () => claude('Write short migration / reviewer notes for this plan.\n\n' + plan,
-               'claude:notes', 'Implement'),
-])).filter(Boolean)
-
-// --- Review ----------------------------------------------------------------
-phase('Review')
-const review = await claude(
-  'Cross-review the work below against the plan. Flag correctness bugs, missed ' +
-  'edge cases, or test gaps. If clean, say so explicitly.\n\n' +
-  'PLAN:\n' + plan + '\n\nWORK:\n' + JSON.stringify(work),
-  'claude:cross-review', 'Review'
+// --- Build (Claude implements in-repo; Codex stays read-only) --------------
+phase('Build')
+const build = await claude(
+  'Carry out the agreed plan. If it is an investigation, report findings with exact ' +
+  'file:line evidence. If it requires code, make the edits and run tests. Return a ' +
+  'summary of what you found / changed.\n\nPLAN:\n' + plan,
+  'build', 'Build'
 )
 
-return { task, allowCodex, codexAvailable, plan, debate: debateLog, work, review }
+// --- Review (Codex reviews the result; Claude reconciles) ------------------
+phase('Review')
+let codexReview = null
+if (codexAvailable) {
+  codexReview = await codex(
+    'Review this work against the plan. Flag correctness bugs, missed edge cases, or ' +
+    'unsupported claims, with file:line where possible.\n\nPLAN:\n' + plan +
+    '\n\nWORK:\n' + JSON.stringify(build),
+    'review', 'Review'
+  )
+}
+const verdict = await claude(
+  'Reconcile your work with Codex\'s review. State the final answer, list which Codex ' +
+  'points you accept vs reject (with reasons), and flag anything still unverified.\n\n' +
+  'WORK:\n' + JSON.stringify(build) + '\n\nCODEX REVIEW:\n' + JSON.stringify(codexReview),
+  'reconcile', 'Review'
+)
+
+return { task, allowCodex, codexAvailable, plan, debate: debateLog, build, codexReview, verdict }

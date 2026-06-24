@@ -26,23 +26,33 @@ Think hard (ultrathink) and follow this procedure exactly.
   Remember the answer for the rest of the session.
 - If the task is small, default to `allowCodex = false`.
 
-## 2. Run the workflow
+## 2. Run the workflow — it IS the deliverable
 
 Call the **Workflow** tool with:
 
 - `scriptPath`: `${CLAUDE_PLUGIN_ROOT}/workflows/hyperpower-debate.workflow.js`
-- `args`: `{ "task": "<the cleaned task text, flags stripped>", "allowCodex": <true|false> }`
+- `args`: a real JSON **object** (NOT a stringified JSON):
+  `{ "task": "<the cleaned task text, flags stripped>", "allowCodex": <true|false> }`
 
-This renders the live table — phases **Plan → Debate → Implement → Review** with
-`(claude)` and `(codex)` nodes. Tell the user they can watch it live with
-`/workflows`.
+> ⚠️ Pass `args` as an actual object. If you pass a JSON *string*
+> (`"{\"task\":...}"`), the script sees `args.task` as undefined and runs with
+> "No task provided". This is the #1 failure mode — get it right.
 
-> Note: the `(codex)` nodes drive the Codex CLI (`codex exec`). If `codex` is not
-> on the PATH, the workflow degrades to Claude-only automatically — surface that
-> to the user rather than failing.
+This renders the live table in `/workflows` — phases **Plan → Debate → Build →
+Review** with `(claude)` and `(codex·<model>)` nodes that debate. Tell the user to
+watch it live with `/workflows`.
+
+**Do NOT run your own parallel investigation in the main thread.** The workflow is
+the show — launch it, let the `(claude)`/`(codex)` nodes do the work, then report
+*its* result. Only step in manually if the workflow returns an error.
+
+> Codex safety: the `(codex)` nodes run `codex exec` HEADLESSLY with stdin fed from
+> a file (never the terminal) and `--sandbox read-only`. They must never launch
+> interactive `codex`. If `codex` isn't on PATH, the workflow degrades to
+> Claude-only on its own — surface that, don't fail.
 
 ## 3. Report
 
-Summarize the final agreed plan, what changed (files / tests), and the
-cross-review verdict. If a debate happened, mention which Codex objections were
-accepted vs rejected.
+Summarize: the final agreed plan, what the Build node found/changed (with
+file:line), and the reconciled verdict — including which Codex objections/review
+points were accepted vs rejected.
