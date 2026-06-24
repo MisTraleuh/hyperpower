@@ -8,18 +8,27 @@ nodes.
 ```
 ▌ hyperpower: refacto auth middleware                      ⠋ running   /workflows
   Plan
-    ✓ (claude) draft-plan              12.3k tok
+    ✓ (claude) draft-plan  [██████████] 100%      12.3k tok
   Debate · round 1
-    ✓ (codex)  critique-plan            8.1k tok   → 3 objections
-    ✓ (claude) revise-plan             6.4k tok   → 2 acceptées, 1 rejetée
+    ✓ (codex)  critique r1 [██████████] 100%       8.1k tok   → 3 objections
+    ✓ (claude) revise r1   [██████████] 100%       6.4k tok   → 2 acceptées, 1 rejetée
   Debate · round 2
-    ✓ (codex)  re-critique             4.2k tok   → accord ✓
-  Implement
-    ⠙ (codex)  implement+tests         running…
-    ⠙ (claude) migration-notes         running…
+    ✓ (codex)  re-critique [██████████] 100%       4.2k tok   → accord ✓
+  Build
+    ⠙ (claude) build       [░░░░░░░░░░] 0%         running…
   Review
-    ○ (claude) cross-review            queued
+    ○ (codex)  review      [░░░░░░░░░░] 0%         queued
+    ○ (claude) reconcile   [░░░░░░░░░░] 0%         queued
+  [████████░░] 83%  5/6 agents · just finished: (codex) review
 ```
+
+> The `[██████░░░░] %` bar is rendered **by the plugin**, not the harness. Each
+> node carries a bar in its **label** (the only per-node text the script controls),
+> and an **overall** workflow bar is emitted via `log()` after each agent finishes.
+> The `12.3k tok` count to the right is drawn by the Claude Code Workflow harness
+> and is out of the plugin's control — a bar on its own row beneath that harness
+> line is not something a plugin can add. See the note in
+> `workflows/hyperpower-debate.workflow.js`.
 
 ## Use
 

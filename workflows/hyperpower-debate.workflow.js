@@ -53,15 +53,56 @@ function codexPrompt(body) {
     body,
   ].join('\n')
 }
+// --- progress bar (emulated) ----------------------------------------------
+// HONEST NOTE ON RENDERING: the live `/workflows` table — the spinner, the phase
+// tree, and the per-node line `✓ (claude) <label>   12.3k tok` — is drawn by the
+// Claude Code Workflow harness, which is NOT in this repo. The script only gets
+// the injected primitives `agent({label,phase,schema,model,effort})`, `phase()`,
+// `log()` and `args`. There is NO progress/detail/subtitle field on a node, and
+// the token count is auto-attached by the harness; the script never sets it.
+// So a bar literally on its OWN new row, directly under the harness-owned token
+// line, is not achievable from the plugin. What we CAN control is (a) the node's
+// LABEL text (rendered on that node's row) and (b) `log()` lines (printed under
+// the active phase). We use both: each node's label carries its own bar, and we
+// emit an overall workflow bar via log() after every completed agent.
+function renderBar(done, total, width = 10) {
+  total = Math.max(1, total)
+  const ratio = Math.max(0, Math.min(1, done / total))
+  const filled = Math.round(ratio * width)
+  // Unicode blocks with an ASCII-safe intent: █ filled, ░ empty. Terminals that
+  // can render the harness table render these fine; if not, they degrade legibly.
+  const bar = '█'.repeat(filled) + '░'.repeat(width - filled)
+  const pct = Math.round(ratio * 100)
+  return '[' + bar + '] ' + pct + '%'
+}
+
+// Total expected agents, used for the overall bar. Recomputed once allowCodex is
+// known: 1 plan + (debate rounds: up to 1 critique + 1 revise each) + 1 build +
+// (1 review) + 1 reconcile. We over-count debate rounds conservatively; the bar
+// only needs to advance monotonically and finish near 100%, not be exact.
+let agentsDone = 0
+let agentsTotal = 1 /* plan */ + 1 /* build */ + 1 /* reconcile */
+function bumpProgress(nodeLabel) {
+  agentsDone++
+  log(renderBar(agentsDone, agentsTotal) + '  ' + agentsDone + '/' + agentsTotal +
+    ' agents · just finished: ' + nodeLabel)
+}
+
 function codex(body, label, phase, schema) {
   // Sonnet/low: capable enough to follow the dumb-pipe procedure without wandering.
-  return agent(codexPrompt(body), {
-    label: '(codex · ' + codexModel + ') ' + label,
+  // The label carries a 0%→ bar on this node's own row (the only row we control).
+  const p = agent(codexPrompt(body), {
+    label: '(codex · ' + codexModel + ') ' + label + '  ' + renderBar(0, 1),
     phase, schema, model: 'sonnet', effort: 'low',
   })
+  return Promise.resolve(p).then((r) => { bumpProgress('(codex) ' + label); return r })
 }
 function claude(prompt, label, phase, schema) {
-  return agent(prompt, { label: '(claude) ' + label, phase, schema })
+  const p = agent(prompt, {
+    label: '(claude) ' + label + '  ' + renderBar(0, 1),
+    phase, schema,
+  })
+  return Promise.resolve(p).then((r) => { bumpProgress('(claude) ' + label); return r })
 }
 
 const PLAN_SCHEMA = {
@@ -79,6 +120,12 @@ const CRITIQUE_SCHEMA = {
 
 log('Task: ' + task.slice(0, 120) + (task.length > 120 ? '…' : ''))
 if (task === 'No task provided') log('WARNING: empty task — check that args was passed as a JSON object, not a string.')
+
+// Now that allowCodex is known, budget the overall bar. With Codex: a typical
+// debate is ~1 critique + 1 revise, plus the review node. renderBar() clamps at
+// 100%, so a slight under-budget just means the bar fills sooner — acceptable.
+if (allowCodex) agentsTotal += 2 /* critique + revise */ + 1 /* review */
+log(renderBar(0, agentsTotal) + '  0/' + agentsTotal + ' agents · starting')
 
 // --- Plan ------------------------------------------------------------------
 phase('Plan')
