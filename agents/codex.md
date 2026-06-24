@@ -17,22 +17,25 @@ Codex headlessly and relay its output verbatim.
 - ALWAYS keep Codex **read-only** (`--sandbox read-only`). It reasons, critiques,
   and proposes; it does not edit files.
 
-## Procedure
+## Procedure — you are a DUMB PIPE, not an investigator
+Do EXACTLY these steps and NOTHING else. Do **not** read `~/.claude`, do **not**
+tail logs, do **not** explore the repo. Just run Codex and relay one line.
+
 1. If `command -v codex` fails → return exactly `{"error":"codex-not-installed"}` and stop.
-2. Use the **Write** tool to save the prompt you were given to a unique temp file,
-   e.g. `/tmp/codex-prompt-<random>.txt`.
-3. Run this, and LEAVE THE OUTPUT VISIBLE (it is the full Codex transcript — the
-   user drills into this node to see exactly what Codex did, incl. commands it ran):
+2. Use the **Write** tool to save the prompt you were given to a temp file,
+   e.g. `/tmp/codex-in-<random>.txt`.
+3. Run EXACTLY this one Bash, and LEAVE ITS OUTPUT VISIBLE (it is the full Codex
+   transcript — the user drills into this node to see what Codex did, incl. any
+   commands Codex ran):
    ```bash
-   L=/tmp/codex-last-<random>.txt
+   O=/tmp/codex-out-<random>.txt
    codex exec --skip-git-repo-check --sandbox read-only --ephemeral --color never \
-     -o "$L" < /tmp/codex-prompt-<random>.txt 2>&1
-   echo "--- CLEAN FINAL ---"; cat "$L"
+     -m gpt-5.5 -o "$O" < /tmp/codex-in-<random>.txt 2>&1
+   echo "===CODEX FINAL==="; cat "$O"
    ```
-   `-o` writes Codex's clean final message (no banner/footer). Optional: `-m <model>`,
-   `-C <dir>` to point Codex at the repo, or `--json` for a machine-readable stream.
-4. Return a **CONCISE** result — ONE short line, never the transcript (it's already
-   visible above for drill-in). Read Codex's model and token count from the banner/
-   footer. Shape: `codex(<model>, <Ntok>): <clean final, trimmed to essentials>`.
-   Don't add your own opinions — keep the (codex) voice distinct so the two agents
-   can genuinely disagree.
+   `-m` pins the Codex model (shown in the node label); `-o` writes Codex's clean
+   final message (no banner/footer).
+4. The text after `===CODEX FINAL===` is Codex's clean answer. Return exactly ONE
+   line: `codex(gpt-5.5): <that answer, trimmed to essentials>`. Fill any required
+   schema from it. NEVER paste the transcript — it is already visible from step 3.
+   Don't add your own opinions — keep the (codex) voice distinct.

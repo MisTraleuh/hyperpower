@@ -24,38 +24,41 @@ let allowCodex = false
 })()
 
 // --- participants ----------------------------------------------------------
-// A (codex) node is a LIGHTWEIGHT Claude proxy (haiku/low) that drives the Codex
-// CLI headlessly. The node's own badge therefore honestly shows the cheap proxy
-// model; Codex's REAL model (e.g. gpt-5.5) is reported inside the node's output.
-// The full Codex transcript stays VISIBLE in the node (drill-in to see what Codex
-// actually ran); the returned value is a tight one-liner.
+// A (codex) node is a Claude subagent that drives the Codex CLI headlessly. Its
+// LABEL carries the real Codex model — "(codex · gpt-5.5)" — pinned via `-m`, so
+// the title is the source of truth for which engine actually thought. (The node's
+// small badge still shows the Claude proxy model — unavoidable: the node IS a
+// Claude subagent driving Codex. The label is what matters.) The proxy runs on
+// Sonnet so it reliably follows the dumb-pipe procedure instead of wandering off
+// (a weaker model went reading ~/.claude transcripts instead of running Codex).
+let codexModel = (args && typeof args === 'object' && args.codexModel) ? String(args.codexModel) : 'gpt-5.5'
 function codexPrompt(body) {
   return [
-    'You are a LIGHTWEIGHT headless proxy for the Codex CLI — NOT Claude. Be cheap and fast.',
-    'SAFETY (a past version hijacked the user terminal — never repeat it):',
-    '  - never run bare `codex` (interactive, steals the TTY); ALWAYS `codex exec`.',
-    '  - ALWAYS feed the prompt from a FILE on stdin; never a shell arg, never the keyboard.',
-    '  - keep Codex read-only.',
-    'Steps:',
+    'You drive the Codex CLI headlessly and relay ONE concise line. You are a DUMB PIPE,',
+    'NOT an investigator. Do EXACTLY these steps and NOTHING else — do NOT read ~/.claude,',
+    'do NOT tail logs, do NOT explore the repo, do NOT run bare `codex` (it steals the TTY).',
     '  1. if `command -v codex` fails -> return {"error":"codex-not-installed"} and stop.',
-    '  2. Write the BODY below to a unique temp file with the Write tool, e.g. /tmp/codex-<rand>.txt.',
-    '  3. Run this Bash and LEAVE ITS OUTPUT VISIBLE — it is the full Codex transcript so the user',
-    '     can drill in and see exactly what Codex did, including any commands Codex ran:',
-    '       L=/tmp/codex-last-<rand>.txt',
+    '  2. Write the BODY below to a temp file with the Write tool, e.g. /tmp/codex-in-<rand>.txt.',
+    '  3. Run EXACTLY this one Bash (leave its full output visible — that is the drill-in detail):',
+    '       O=/tmp/codex-out-<rand>.txt',
     '       codex exec --skip-git-repo-check --sandbox read-only --ephemeral --color never \\',
-    '         -o "$L" < /tmp/codex-<rand>.txt 2>&1; echo "--- CLEAN FINAL ---"; cat "$L"',
-    '  4. RETURN A CONCISE RESULT — one short line, NEVER the transcript (already visible above).',
-    '     Read Codex\'s model and token count from the transcript banner/footer. Shape:',
-    '       codex(<model>, <Ntok>): <clean final from -o, trimmed to the essentials>',
-    '     If a JSON schema is requested, fill it from the clean final and keep strings tight.',
+    '         -m ' + codexModel + ' -o "$O" < /tmp/codex-in-<rand>.txt 2>&1',
+    '       echo "===CODEX FINAL==="; cat "$O"',
+    '  4. The text after "===CODEX FINAL===" is Codex\'s clean answer. Return exactly ONE line:',
+    '       codex(' + codexModel + '): <that answer, trimmed to the essentials>',
+    '     If a JSON schema is required, fill it from that answer with tight strings.',
+    '     NEVER paste the full transcript into your answer — it is already visible from step 3.',
     '',
     '--- BODY FOR CODEX ---',
     body,
   ].join('\n')
 }
 function codex(body, label, phase, schema) {
-  // haiku/low: the proxy does trivial relay work, so its node badge stays cheap & honest.
-  return agent(codexPrompt(body), { label: '(codex) ' + label, phase, schema, model: 'haiku', effort: 'low' })
+  // Sonnet/low: capable enough to follow the dumb-pipe procedure without wandering.
+  return agent(codexPrompt(body), {
+    label: '(codex · ' + codexModel + ') ' + label,
+    phase, schema, model: 'sonnet', effort: 'low',
+  })
 }
 function claude(prompt, label, phase, schema) {
   return agent(prompt, { label: '(claude) ' + label, phase, schema })
