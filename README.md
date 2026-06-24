@@ -55,6 +55,35 @@ The "allow codex" decision is remembered for the rest of the session.
 The `(codex)` nodes shell out to the **Codex CLI** (`codex exec`). If `codex`
 isn't on the PATH, the workflow degrades to Claude-only automatically.
 
+## Live per-agent progress bar (our own view)
+
+Claude Code's `/workflows` table can't show a per-agent bar (its native binary draws
+that row and a plugin can't touch it — see below). So hyperpower ships its **own**
+live view that we fully control: `bin/hyperpower-progress`. It reads the workflow's
+real-time state files and renders an animated bar per agent:
+
+```
+hyperpower · live progress  wf_2cfb98e7-ff9
+──────────────────────────────────────────────────────────
+ ✔ (claude) draft-plan  [██████████████████████]  done
+ ⏺ (codex) critique     [   ███   ▒ moving ▒    ]  running
+ ○ (claude) build       [░░░░░░░░░░░░░░░░░░░░░░]  queued
+──────────────────────────────────────────────────────────
+ 1/3 agents · running…
+```
+
+Empty → animated (marching) while running → full when done. Run it in a **separate
+pane** (e.g. a cmux split) next to your Claude session:
+
+```
+hyperpower-progress           # auto-attach to the most recent active run
+hyperpower-progress <wf_dir>  # attach to a specific run dir
+```
+
+It watches `~/.claude/projects/<proj>/<session>/subagents/workflows/wf_*/` —
+`journal.jsonl` (started/result per agent) and the live `agent-<id>.jsonl` files.
+Nothing to patch, nothing the auto-updater can wipe.
+
 ## Known limitations / honesty
 
 - **The `(codex)` model badge shows the Claude proxy model (e.g. Sonnet), not

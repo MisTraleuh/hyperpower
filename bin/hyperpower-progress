@@ -1,0 +1,187 @@
+#!/usr/bin/env node
+/*
+ * hyperpower-progress — a live, per-agent progress bar for hyperpower workflows.
+ *
+ * WHY THIS EXISTS: the `/workflows` table is drawn by Claude Code's native binary
+ * (Bun-compiled bytecode — no patchable source), so a plugin CANNOT add a per-agent
+ * bar to that table. Instead we render OUR OWN live view, which we fully control, by
+ * reading the workflow's real-time state files:
+ *   <session>/subagents/workflows/wf_<id>/journal.jsonl    (started/result per agent)
+ *   <session>/subagents/workflows/wf_<id>/agent-<id>.jsonl (live transcript, grows)
+ *
+ * Run it in a separate pane (cmux split) next to your Claude session:
+ *   hyperpower-progress              # auto-attach to the most recent active run
+ *   hyperpower-progress <wf_dir>     # attach to a specific run dir
+ *
+ * Per-agent bar: empty (not started) → animated (running) → full (done).
+ */
+'use strict'
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+
+const ARG = process.argv[2]
+const TTY = process.stdout.isTTY
+const C = TTY ? {
+  reset: '\x1b[0m', dim: '\x1b[2m', bold: '\x1b[1m',
+  green: '\x1b[32m', cyan: '\x1b[36m', gray: '\x1b[90m', yellow: '\x1b[33m',
+} : new Proxy({}, { get: () => '' })
+
+const WIDTH = 22
+const FILLED = '█', EMPTY = '░'
+
+function projectsRoot() { return path.join(os.homedir(), '.claude', 'projects') }
+
+// Find the most-recently-active workflow run dir (newest journal.jsonl).
+function findRunDir() {
+  if (ARG && fs.existsSync(ARG)) return ARG
+  const root = projectsRoot()
+  let best = null, bestMtime = 0
+  let projects = []
+  try { projects = fs.readdirSync(root) } catch { return null }
+  for (const proj of projects) {
+    for (const sess of safeReaddir(path.join(root, proj))) {
+      const wfRoot = path.join(root, proj, sess, 'subagents', 'workflows')
+      for (const wf of safeReaddir(wfRoot)) {
+        const j = path.join(wfRoot, wf, 'journal.jsonl')
+        try {
+          const m = fs.statSync(j).mtimeMs
+          if (m > bestMtime) { bestMtime = m; best = path.join(wfRoot, wf) }
+        } catch {}
+      }
+    }
+  }
+  return best
+}
+function safeReaddir(d) { try { return fs.readdirSync(d) } catch { return [] } }
+
+// Parse journal.jsonl into ordered agent state.
+function readState(runDir) {
+  const j = path.join(runDir, 'journal.jsonl')
+  let lines = []
+  try { lines = fs.readFileSync(j, 'utf8').split('\n').filter(Boolean) } catch { return [] }
+  const order = []          // agentIds in start order
+  const started = new Set()
+  const done = new Set()
+  for (const ln of lines) {
+    let e; try { e = JSON.parse(ln) } catch { continue }
+    if (!e.agentId) continue
+    if (e.type === 'started') {
+      if (!started.has(e.agentId)) { started.add(e.agentId); order.push(e.agentId) }
+    } else if (e.type === 'result') {
+      done.add(e.agentId)
+    }
+  }
+  return order.map((id) => {
+    const af = path.join(runDir, 'agent-' + id + '.jsonl')
+    let size = 0, mtime = 0
+    try { const st = fs.statSync(af); size = st.size; mtime = st.mtimeMs } catch {}
+    return { id, done: done.has(id), label: labelFor(af), size, mtime }
+  })
+}
+
+// Derive a friendly label from the agent's prompt (first user message).
+const labelCache = new Map()
+function labelFor(agentFile) {
+  if (labelCache.has(agentFile)) return labelCache.get(agentFile)
+  let blob = ''
+  try { blob = fs.readFileSync(agentFile, 'utf8').slice(0, 8000) } catch {}
+  const isCodex = /drive the Codex CLI|--- BODY FOR CODEX ---/.test(blob)
+  const engine = isCodex ? '(codex)' : '(claude)'
+  let role = 'agent'
+  if (/Draft a concise/.test(blob)) role = 'draft-plan'
+  else if (/Critique (this|the)/.test(blob)) role = 'critique'
+  else if (/Address EACH|REVISED plan/.test(blob)) role = 'revise'
+  else if (/Carry out the agreed plan/.test(blob)) role = 'build'
+  else if (/Review this work/.test(blob)) role = 'review'
+  else if (/Reconcile your work/.test(blob)) role = 'reconcile'
+  const label = engine + ' ' + role
+  if (blob) labelCache.set(agentFile, label)   // only cache once the file has content
+  return label
+}
+
+function bar(ratio, frame, running) {
+  const r = Math.max(0, Math.min(1, ratio))
+  if (running) {
+    // marching pulse: a 5-wide bright window sliding across, to signal activity.
+    const pos = frame % (WIDTH + 5)
+    let s = ''
+    for (let i = 0; i < WIDTH; i++) {
+      const inWindow = i >= pos - 4 && i <= pos
+      s += inWindow ? FILLED : EMPTY
+    }
+    return C.cyan + '[' + s + ']' + C.reset
+  }
+  const n = Math.round(r * WIDTH)
+  const col = r >= 1 ? C.green : C.cyan
+  return col + '[' + FILLED.repeat(n) + EMPTY.repeat(WIDTH - n) + ']' + C.reset
+}
+
+function fmtAge(ms) {
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return s + 's'
+  return Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0')
+}
+
+let frame = 0
+function render(runDir) {
+  const agents = readState(runDir)
+  const now = Date.now()
+  const doneCount = agents.filter((a) => a.done).length
+  const total = agents.length
+  const out = []
+  out.push(C.bold + 'hyperpower · live progress' + C.reset + '  ' +
+    C.dim + path.basename(runDir) + C.reset)
+  out.push(C.dim + '─'.repeat(58) + C.reset)
+  for (const a of agents) {
+    const running = !a.done
+    const recent = now - a.mtime < 4000
+    const ratio = a.done ? 1 : 0
+    const icon = a.done ? C.green + '✔' + C.reset
+      : (recent ? C.cyan + '⏺' + C.reset : C.gray + '○' + C.reset)
+    const label = (a.label || '(agent)').padEnd(20)
+    const b = bar(ratio, frame, running && recent)
+    const meta = a.done ? C.green + 'done' + C.reset
+      : (recent ? C.cyan + 'running' + C.reset : C.gray + 'queued' + C.reset)
+    out.push(' ' + icon + ' ' + label + ' ' + b + '  ' + meta)
+  }
+  if (total === 0) out.push(C.dim + ' waiting for agents…' + C.reset)
+  out.push(C.dim + '─'.repeat(58) + C.reset)
+  const allDone = total > 0 && doneCount === total
+  out.push(' ' + (allDone ? C.green + '✔ ' : '') +
+    C.bold + doneCount + '/' + total + ' agents' + C.reset +
+    (allDone ? C.green + ' · workflow complete' + C.reset : C.dim + ' · running…' + C.reset))
+
+  if (TTY) process.stdout.write('\x1b[H\x1b[2J' + out.join('\n') + '\n')
+  else process.stdout.write(out.join('\n') + '\n')
+  return { allDone, total }
+}
+
+function main() {
+  let runDir = findRunDir()
+  if (!runDir) {
+    console.error('hyperpower-progress: no workflow run found yet. Start a /hyperpower workflow, then run this.')
+    process.exit(1)
+  }
+  if (TTY) process.stdout.write('\x1b[?25l') // hide cursor
+  const cleanup = () => { if (TTY) process.stdout.write('\x1b[?25h\n') ; process.exit(0) }
+  process.on('SIGINT', cleanup); process.on('SIGTERM', cleanup)
+
+  if (!TTY) { render(runDir); return }
+
+  let doneSince = 0
+  const tick = () => {
+    // re-attach if a newer run appeared
+    const latest = findRunDir(); if (latest) runDir = ARG && fs.existsSync(ARG) ? ARG : latest
+    const { allDone, total } = render(runDir)
+    frame++
+    if (allDone && total > 0) {
+      if (!doneSince) doneSince = Date.now()
+      else if (Date.now() - doneSince > 8000) cleanup() // linger 8s after completion
+    } else { doneSince = 0 }
+  }
+  tick()
+  setInterval(tick, 250)
+}
+
+main()
