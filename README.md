@@ -8,30 +8,31 @@ nodes.
 ```
 ▌ hyperpower: refacto auth middleware                      ⠋ running   /workflows
   Plan
-    ✔ (claude) draft-plan        Opus 4.8 (1M context)   9.4k tok · 1 tool · 39s
+    ✔ ▰▱▱▱▱ (claude) draft-plan        Opus 4.8 (1M context)   9.4k tok · 1 tool · 39s
   Debate · round 1
-    ✔ (codex · gpt-5.5) critique r1   Sonnet 4.6   8.1k tok · 2 tools · 22s
-    ✔ (claude) revise r1         Opus 4.8 (1M context)   6.4k tok · 0 tools · 31s
-  Debate · round 2
-    ✔ (codex · gpt-5.5) critique r2   Sonnet 4.6   4.2k tok · 2 tools · 18s
+    ✔ ▰▰▱▱▱ (codex · gpt-5.5) critique r1   Sonnet 4.6   8.1k tok · 2 tools · 22s
+    ✔ ▰▰▰▱▱ (claude) revise r1         Opus 4.8 (1M context)   6.4k tok · 0 tools · 31s
   Build
-    ⠙ (claude) build             Opus 4.8 (1M context)   running…
+    ⠙ ▰▰▰▰▱ (claude) build             Opus 4.8 (1M context)   running…
   Review
-    ○ (codex · gpt-5.5) review        queued
-    ○ (claude) reconcile         queued
+    ○ ▰▰▰▰▰ (codex · gpt-5.5) review        queued
+    ○ ▰▰▰▰▰ (claude) reconcile         queued
   [████████░░] 83%  5/6 agents · just finished: (codex) review
 ```
 
-> The **only** bar is the **overall** one on the last line — emitted by the plugin
-> via `log()` after each agent finishes. It is honest: it advances monotonically
-> and tracks real completed/total agent counts.
+> **Per-node bar** — each node's **label** is prefixed with a short `▰▰▰▱▱` bar.
+> It is baked at spawn time from the node's real step index (step N of total), so
+> the bar **fills up as you scan down the list**. It sits at the front so the
+> harness truncation (`…`) trims the label tail, never the bar.
 >
-> There is **no per-node bar**, on purpose. The only per-node text a plugin can set
-> is the node's **label**; a label is fixed at agent-creation and never updated, so
-> a bar there would freeze at 0% (a lie) and truncate the collapsed view. The model
-> badge, the `9.4k tok · 1 tool · 39s` zone, and everything to the right of the
-> label are drawn by the Claude Code Workflow harness and are not injectable from a
-> plugin. See the note in `workflows/hyperpower-debate.workflow.js`.
+> A single node's bar does **not** self-animate — a label is fixed once the agent
+> spawns, and "percent of one agent" is undefined — so progress is shown **across**
+> nodes, which is the real signal. (The earlier 0.0.5/0.0.6 builds hardcoded
+> `renderBar(0, 1)` → always 0%; that was the "frozen bar" bug, now fixed.)
+>
+> **Overall bar** — the last line is the overall `[████░░] %` bar, emitted via
+> `log()` after each agent. The model badge and the `9.4k tok · 1 tool · 39s` zone
+> are drawn by the Claude Code harness and are not injectable from a plugin.
 
 ## Use
 
@@ -64,11 +65,11 @@ isn't on the PATH, the workflow degrades to Claude-only automatically.
   the harness badge reflects the Claude model running the node. This is not
   fixable from a plugin. The `(codex · gpt-5.5)` text in the node **label** is the
   source of truth for which engine actually thought.
-- **No per-node progress bar.** The only per-node text a plugin can set is the
-  label, which is fixed at creation and never updated — a bar there would freeze
-  at 0% and truncate the collapsed view. The single **overall** bar (via `log()`)
-  is the only honest one. The token/tool/duration zone and model badge are
-  harness-drawn and cannot be modified by the plugin.
+- **Per-node bar is a step-index bar, not intra-agent.** Each node's label is
+  prefixed with a `▰▰▰▱▱` bar baked at spawn from its step index, so it advances
+  across the node list — but one node's bar can't move on its own (the label is
+  fixed at creation; "percent of one agent" is undefined). The token/tool/duration
+  zone and the model badge are harness-drawn and cannot be modified by the plugin.
 
 ## Requirements
 

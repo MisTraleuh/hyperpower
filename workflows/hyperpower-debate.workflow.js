@@ -70,14 +70,19 @@ function codexPrompt(body) {
 // the model badge → token count zone (the gap between the model name and "k tok")
 // is drawn entirely by the harness; the script cannot inject text there.
 //
-// What we CAN control is (a) the node's LABEL text and (b) `log()` lines (printed
-// under the active phase). We deliberately do NOT put a per-node bar in the label:
-//   - it freezes at 0% (the label is set once at agent-creation and never updated,
-//     so a node's bar can never show progress — it is a lie); and
-//   - it lengthens the label, which truncates the collapsed-Phases view.
-// So the ONLY bar we draw is the OVERALL workflow bar, emitted via `log()` after
-// each agent finishes (bumpProgress). That one is honest: it advances monotonically
-// and reflects real completed/total agent counts.
+// What we CAN control is (a) the node's LABEL text and (b) `log()` lines.
+// We draw the bar in TWO honest places:
+//   1. A short OVERALL-progress bar PREFIXED to each node's label. It is baked at
+//      spawn time from the real step index (this node is step N of total), so the
+//      bar ADVANCES as you scan down the node list (step 1 ≈ 17%, … last = 100%).
+//      It sits at the FRONT so the harness truncation ("…") trims the label TAIL,
+//      never the bar. A single node's bar does not self-animate — the label is
+//      fixed once the agent spawns, and "percent of one agent" is undefined — so
+//      progress is shown ACROSS nodes, which is the real, honest signal.
+//   2. The same overall bar via `log()` after each agent (bumpProgress).
+// PREVIOUS BUG: the old code baked renderBar(0, 1) — literally always 0/1 = 0% —
+// into every label. THAT is the "frozen 0%" bar the user saw; it was a hardcoded
+// zero, not an impossibility. Fixed below by using the real running step index.
 function renderBar(done, total, width = 10) {
   total = Math.max(1, total)
   const ratio = Math.max(0, Math.min(1, done / total))
@@ -101,19 +106,31 @@ function bumpProgress(nodeLabel) {
     ' agents · just finished: ' + nodeLabel)
 }
 
+// Short bar PREFIXED to each node label: this node's step index / total, as a
+// 5-block bar (no %/brackets, to stay compact and survive truncation). Computed at
+// spawn, so each node shows a slightly fuller bar than the one above it — a real
+// advancing progress bar across the node list, instead of the old hardcoded 0%.
+let agentSeq = 0
+function labelBar() {
+  agentSeq++
+  const ratio = Math.max(0, Math.min(1, agentSeq / Math.max(1, agentsTotal)))
+  const filled = Math.round(ratio * 5)
+  return '▰'.repeat(filled) + '▱'.repeat(5 - filled)
+}
+
 function codex(body, label, phase, schema) {
   // Sonnet/low: capable enough to follow the dumb-pipe procedure without wandering.
-  // No per-node bar in the label (it would freeze at 0% and truncate the label);
-  // the label's "(codex · <model>)" prefix is the source of truth for the engine.
+  // labelBar() prefixes a short overall-progress bar; the "(codex · <model>)" tag
+  // stays the source of truth for which engine actually thought.
   const p = agent(codexPrompt(body), {
-    label: '(codex · ' + codexModel + ') ' + label,
+    label: labelBar() + ' (codex · ' + codexModel + ') ' + label,
     phase, schema, model: 'sonnet', effort: 'low',
   })
   return Promise.resolve(p).then((r) => { bumpProgress('(codex) ' + label); return r })
 }
 function claude(prompt, label, phase, schema) {
   const p = agent(prompt, {
-    label: '(claude) ' + label,
+    label: labelBar() + ' (claude) ' + label,
     phase, schema,
   })
   return Promise.resolve(p).then((r) => { bumpProgress('(claude) ' + label); return r })
