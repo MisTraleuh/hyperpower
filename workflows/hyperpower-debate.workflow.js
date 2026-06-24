@@ -61,28 +61,23 @@ function codexPrompt(body) {
     body,
   ].join('\n')
 }
-// --- progress bar (emulated) ----------------------------------------------
-// HONEST NOTE ON RENDERING: the live `/workflows` table — the spinner, the phase
-// tree, and the per-node line `✓ (claude) <label>   12.3k tok` — is drawn by the
-// Claude Code Workflow harness, which is NOT in this repo. The script only gets
-// the injected primitives `agent({label,phase,schema,model,effort})`, `phase()`,
-// `log()` and `args`. There is NO progress/detail/subtitle field on a node, and
-// the model badge → token count zone (the gap between the model name and "k tok")
-// is drawn entirely by the harness; the script cannot inject text there.
+// --- progress: what a plugin can and CANNOT do -----------------------------
+// HONEST NOTE: the live `/workflows` table — the spinner, the phase tree, and the
+// per-node line `✓ (claude) <label>  Opus 4.8   12.3k tok · 5 tools · 40s` — is
+// drawn by Claude Code's own native binary (a Bun-compiled executable, ~217 MB,
+// at ~/.local/share/claude/versions/<v>), NOT by this repo. A plugin only gets the
+// injected primitives `agent({label,phase,schema,model,effort})`, `phase()`,
+// `log()` and `args`.
 //
-// What we CAN control is (a) the node's LABEL text and (b) `log()` lines.
-// We draw the bar in TWO honest places:
-//   1. A short OVERALL-progress bar PREFIXED to each node's label. It is baked at
-//      spawn time from the real step index (this node is step N of total), so the
-//      bar ADVANCES as you scan down the node list (step 1 ≈ 17%, … last = 100%).
-//      It sits at the FRONT so the harness truncation ("…") trims the label TAIL,
-//      never the bar. A single node's bar does not self-animate — the label is
-//      fixed once the agent spawns, and "percent of one agent" is undefined — so
-//      progress is shown ACROSS nodes, which is the real, honest signal.
-//   2. The same overall bar via `log()` after each agent (bumpProgress).
-// PREVIOUS BUG: the old code baked renderBar(0, 1) — literally always 0/1 = 0% —
-// into every label. THAT is the "frozen 0%" bar the user saw; it was a hardcoded
-// zero, not an impossibility. Fixed below by using the real running step index.
+// A true PER-AGENT progress bar (empty when queued → animated while running →
+// full when done, placed in the gap between the model badge and the token count)
+// is a HARNESS feature. A plugin cannot do it: the only per-node text we control
+// is the LABEL, which is fixed once the agent spawns and can never update — so it
+// can show neither live progress nor a "done = full" state. We therefore do NOT
+// fake a per-node bar (an earlier version put renderBar(0,1) — always 0% — into the
+// label, which looked frozen and truncated the view). The honest progress signal
+// is the harness's own "X/Y agents · time" header plus the OVERALL bar we emit via
+// log() after each agent finishes (bumpProgress).
 function renderBar(done, total, width = 10) {
   total = Math.max(1, total)
   const ratio = Math.max(0, Math.min(1, done / total))
@@ -106,31 +101,19 @@ function bumpProgress(nodeLabel) {
     ' agents · just finished: ' + nodeLabel)
 }
 
-// Short bar PREFIXED to each node label: this node's step index / total, as a
-// 5-block bar (no %/brackets, to stay compact and survive truncation). Computed at
-// spawn, so each node shows a slightly fuller bar than the one above it — a real
-// advancing progress bar across the node list, instead of the old hardcoded 0%.
-let agentSeq = 0
-function labelBar() {
-  agentSeq++
-  const ratio = Math.max(0, Math.min(1, agentSeq / Math.max(1, agentsTotal)))
-  const filled = Math.round(ratio * 5)
-  return '▰'.repeat(filled) + '▱'.repeat(5 - filled)
-}
-
 function codex(body, label, phase, schema) {
   // Sonnet/low: capable enough to follow the dumb-pipe procedure without wandering.
-  // labelBar() prefixes a short overall-progress bar; the "(codex · <model>)" tag
-  // stays the source of truth for which engine actually thought.
+  // No bar in the label (it can't update, so it would only ever lie); the
+  // "(codex · <model>)" tag stays the source of truth for which engine thought.
   const p = agent(codexPrompt(body), {
-    label: labelBar() + ' (codex · ' + codexModel + ') ' + label,
+    label: '(codex · ' + codexModel + ') ' + label,
     phase, schema, model: 'sonnet', effort: 'low',
   })
   return Promise.resolve(p).then((r) => { bumpProgress('(codex) ' + label); return r })
 }
 function claude(prompt, label, phase, schema) {
   const p = agent(prompt, {
-    label: labelBar() + ' (claude) ' + label,
+    label: '(claude) ' + label,
     phase, schema,
   })
   return Promise.resolve(p).then((r) => { bumpProgress('(claude) ' + label); return r })
@@ -183,12 +166,24 @@ let codexAvailable = allowCodex
 const debateLog = []
 if (allowCodex) {
   const MAX_ROUNDS = 3
+  // Force a REAL debate: Codex may not rubber-stamp on round 1, and we require at
+  // least one full critique→revise cycle before any agreement is accepted. This is
+  // the fix for "the debate gets skipped / it doesn't think enough": before, Codex
+  // could `agree` on the first pass and the loop broke with zero revisions.
+  const MIN_REVISIONS = 1
+  let revisions = 0
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     phase('Debate')
-    log('Debate r' + round + ': Codex is reviewing Claude\'s plan (read-only)…')
+    log('Debate r' + round + ': Codex is challenging the plan (read-only)…')
+    const firstPass = round === 1
     const critique = await codex(
-      'Critique this plan. Return concrete objections, or agree.\n\nTASK:\n' + task + '\n\nPLAN:\n' + plan +
-      FINAL_TEXT_NOTE,
+      (firstPass
+        ? 'Adversarially critique this plan. You MUST surface at least TWO concrete, ' +
+          'specific weaknesses, risks, or gaps — do NOT rubber-stamp and do NOT agree on ' +
+          'this first pass. Set agree=false and list the objections.'
+        : 'Critique the REVISED plan. If it is genuinely solid now, you may set agree=true; ' +
+          'otherwise return remaining concrete objections.') +
+      '\n\nTASK:\n' + task + '\n\nPLAN:\n' + plan + FINAL_TEXT_NOTE,
       'critique r' + round, 'Debate', CRITIQUE_SCHEMA
     )
     if (!critique || critique.error) {
@@ -196,11 +191,19 @@ if (allowCodex) {
       codexAvailable = false
       break
     }
-    const objections = critique.objections || []
-    if (critique.agree || objections.length === 0) {
-      log('Codex agrees after round ' + round + '.')
+    let objections = critique.objections || []
+    // Only accept agreement once at least one revision has actually happened.
+    if ((critique.agree || objections.length === 0) && revisions >= MIN_REVISIONS) {
+      log('Codex agrees after round ' + round + ' (post-revision).')
       debateLog.push({ round, agreed: true })
       break
+    }
+    // No objections but we still owe a revision: make Claude self-harden the plan
+    // rather than waving it through, so there is always genuine back-and-forth.
+    if (objections.length === 0) {
+      log('Codex raised no objections on r' + round + ' — forcing a hardening pass anyway.')
+      objections = ['No explicit objection from Codex — proactively harden the plan: ' +
+        'tighten the weakest step, add an edge case you may have missed, and state one risk.']
     }
     debateLog.push({ round, objections })
     plan = (await claude(
@@ -209,6 +212,7 @@ if (allowCodex) {
       '\n\nCURRENT PLAN:\n' + plan + FINAL_TEXT_NOTE,
       'revise r' + round, 'Debate', PLAN_SCHEMA
     )).plan
+    revisions++
   }
 }
 
