@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /*
- * hyperpower-progress — a live, per-agent progress bar for hyperpower workflows.
+ * hyperpower-progress — a live, per-agent dashboard for hyperpower workflows.
  *
  * WHY THIS EXISTS: the `/workflows` table is drawn by Claude Code's native binary
  * (Bun-compiled bytecode — no patchable source), so a plugin CANNOT add a per-agent
- * bar to that table. Instead we render OUR OWN live view, which we fully control, by
- * reading the workflow's real-time state files:
+ * bar to that table. Instead we render OUR OWN full-screen live view, which we fully
+ * control, by reading the workflow's real-time state files:
  *   <session>/subagents/workflows/wf_<id>/journal.jsonl    (started/result per agent)
  *   <session>/subagents/workflows/wf_<id>/agent-<id>.jsonl (live transcript, grows)
  *
@@ -13,7 +13,26 @@
  *   hyperpower-progress              # auto-attach to the most recent active run
  *   hyperpower-progress <wf_dir>     # attach to a specific run dir
  *
- * Per-agent bar: empty (not started) → animated (running) → full (done).
+ * HONESTY MODEL (read before changing anything):
+ *  - The per-agent bar is an ACTIVITY animation, NOT a percentage: empty (queued) →
+ *    a marching pulse window while running → full GREEN when done. There is no
+ *    real "% complete" signal on disk, so we never fake one.
+ *  - tokens / tools are REAL measurements parsed from the transcript. `0 tok` and
+ *    `0 tools` are rendered as-is when the file is readable; they are OMITTED only
+ *    when the transcript can't be parsed yet (no honest number to show).
+ *  - Durations are REAL transcript spans: done = lastTs−firstTs, running = now−firstTs.
+ *    Absent timestamps are omitted. File mtime is used ONLY for change-detection /
+ *    "recently active", never displayed as a duration.
+ *  - The Codex model in the label is parsed from the node's prompt blob (`-m <model>`).
+ *    A codex node with no extractable `-m` shows `(codex)` with NO model — we never
+ *    default to a guess. (The harness's own model badge for a codex node is the
+ *    Claude PROXY model, sonnet — not the real Codex model; that's a native-row
+ *    limitation we can't touch and don't pretend to.)
+ *  - The expected-total is a STATE MACHINE / lower bound derived from observed
+ *    started roles + journal results, with the invariant `expected = max(expected,
+ *    started)` always enforced. We never copy the workflow's own (admittedly
+ *    under-counting) a-priori budget.
+ *  - The debate round is INFERRED as `max(1, critiqueCount)` and labelled "(inferred)".
  */
 'use strict'
 const fs = require('fs')
@@ -25,21 +44,21 @@ const TTY = process.stdout.isTTY
 const C = TTY ? {
   reset: '\x1b[0m', dim: '\x1b[2m', bold: '\x1b[1m',
   green: '\x1b[32m', cyan: '\x1b[36m', gray: '\x1b[90m', yellow: '\x1b[33m',
+  magenta: '\x1b[35m',
 } : new Proxy({}, { get: () => '' })
 
 const WIDTH = 22
 const FILLED = '█', EMPTY = '░'
 
 function projectsRoot() { return path.join(os.homedir(), '.claude', 'projects') }
+function safeReaddir(d) { try { return fs.readdirSync(d) } catch { return [] } }
 
 // Find the most-recently-active workflow run dir (newest journal.jsonl).
 function findRunDir() {
   if (ARG && fs.existsSync(ARG)) return ARG
   const root = projectsRoot()
   let best = null, bestMtime = 0
-  let projects = []
-  try { projects = fs.readdirSync(root) } catch { return null }
-  for (const proj of projects) {
+  for (const proj of safeReaddir(root)) {
     for (const sess of safeReaddir(path.join(root, proj))) {
       const wfRoot = path.join(root, proj, sess, 'subagents', 'workflows')
       for (const wf of safeReaddir(wfRoot)) {
@@ -53,108 +72,380 @@ function findRunDir() {
   }
   return best
 }
-function safeReaddir(d) { try { return fs.readdirSync(d) } catch { return [] } }
 
-// Parse journal.jsonl into ordered agent state.
+// ---------------------------------------------------------------------------
+// Role + engine + codex-model inference from the agent's prompt blob.
+// Role is NOT a disk field; it is inferred by regex over the transcript text.
+// NOTE on ordering: a codex critique on a revised round embeds the words
+// "REVISED plan" (it asks Codex to critique the revised plan), which also matches
+// the `revise` regex — so critique MUST be tested before revise. (Verified on a
+// real run: a codex critique-r2 agent matched both; critique-first keeps it correct.)
+const roleCache = new Map() // agentFile -> {role, engine, codexModel} | null (unreadable)
+function classify(agentFile) {
+  let blob = ''
+  try { blob = fs.readFileSync(agentFile, 'utf8').slice(0, 9000) } catch {}
+  if (!blob) return null
+  const isCodex = /drive the Codex CLI|BODY FOR CODEX/.test(blob)
+  let codexModel = null
+  if (isCodex) {
+    // Anchor on the real `codex exec … -m <model>` invocation so we never pick up a
+    // stray "-m" elsewhere in prose. Present → real model; absent → null (honest
+    // omission, never a guessed default).
+    const m = blob.match(/codex exec[\s\S]{0,200}?-m\s+([\w.][\w.\-]*)/)
+    if (m) codexModel = m[1]
+  }
+  let role = 'agent'
+  // NOTE: critique must be tested before revise. A round-1 critique reads
+  // "Adversarially critique this plan" (lowercase), a later round reads "Critique
+  // the REVISED plan" — the latter also matches the revise regex, so order matters.
+  // We match critique case-insensitively and also key off its unique "agree=false"
+  // instruction so round-1 critiques are not mis-slotted as the generic build node.
+  if (/Draft a concise/.test(blob)) role = 'draft-plan'
+  else if (/critique th(is|e)|Set agree=false|Critique the REVISED plan/i.test(blob)) role = 'critique'
+  else if (/Address EACH|return the REVISED plan/i.test(blob)) role = 'revise'
+  else if (/Carry out the agreed plan/.test(blob)) role = 'build'
+  else if (/Review this work/.test(blob)) role = 'review'
+  else if (/Reconcile your work/.test(blob)) role = 'reconcile'
+  return { role, engine: isCodex ? 'codex' : 'claude', codexModel }
+}
+function classifyCached(agentFile) {
+  if (roleCache.has(agentFile)) {
+    const v = roleCache.get(agentFile)
+    if (v) return v // only cache positive (readable) results, so a not-yet-written
+                    // file is retried next tick instead of being stuck unreadable.
+  }
+  const v = classify(agentFile)
+  if (v) roleCache.set(agentFile, v)
+  return v
+}
+
+// Which top-level phase a role belongs to.
+function phaseOf(role) {
+  if (role === 'draft-plan') return 'Plan'
+  if (role === 'critique' || role === 'revise') return 'Debate'
+  if (role === 'build') return 'Build'
+  if (role === 'review' || role === 'reconcile') return 'Review'
+  return 'Build' // unknown roles sit in the build slot rather than inventing a phase
+}
+const PHASE_ORDER = ['Plan', 'Debate', 'Build', 'Review']
+
+// ---------------------------------------------------------------------------
+// Per-agent transcript parser (partial-write safe). Streams the file once; a
+// JSON.parse failure on any single line (esp. a mid-append final line) is skipped
+// WITHOUT discarding accumulated state. Cached by mtime+size; a re-read that yields
+// a truncated tail keeps the prior cached detail (never blank-flicker).
+const detailCache = new Map() // agentFile -> {mtime, size, detail}
+function shortInput(input) {
+  if (!input || typeof input !== 'object') return ''
+  const k = Object.keys(input)[0]
+  if (!k) return ''
+  let v = input[k]
+  if (typeof v !== 'string') v = JSON.stringify(v)
+  v = String(v).replace(/\s+/g, ' ').trim()
+  if (v.length > 24) v = v.slice(0, 23) + '…'
+  return v
+}
+function readAgentDetail(agentFile) {
+  let st
+  try { st = fs.statSync(agentFile) } catch { return null }
+  const cached = detailCache.get(agentFile)
+  if (cached && cached.mtime === st.mtimeMs && cached.size === st.size) return cached.detail
+
+  let raw = ''
+  try { raw = fs.readFileSync(agentFile, 'utf8') } catch {
+    return cached ? cached.detail : null
+  }
+  const lines = raw.split('\n')
+  let readable = false
+  let tokIn = 0, tokOut = 0, tools = 0
+  let lastTool = null, model = null
+  let firstTs = null, lastTs = null
+  for (const ln of lines) {
+    if (!ln) continue
+    let e
+    try { e = JSON.parse(ln) } catch { continue } // skip a single bad/truncated line
+    readable = true
+    if (e.timestamp) {
+      if (!firstTs) firstTs = e.timestamp
+      lastTs = e.timestamp
+    }
+    if (e.type === 'assistant' && e.message && typeof e.message === 'object') {
+      const m = e.message
+      if (m.model) model = m.model
+      const u = m.usage
+      if (u && typeof u === 'object') {
+        tokIn += (u.input_tokens || 0)
+        tokOut += (u.output_tokens || 0)
+      }
+      const content = Array.isArray(m.content) ? m.content : []
+      for (const x of content) {
+        if (x && x.type === 'tool_use') {
+          tools++
+          lastTool = (x.name || 'tool') + '(' + shortInput(x.input) + ')'
+        }
+      }
+    }
+  }
+  if (!readable) {
+    // nothing parsed this read (e.g. a single truncated line) — keep prior detail.
+    return cached ? cached.detail : null
+  }
+  const detail = {
+    readable: true,
+    tokens: tokIn + tokOut,
+    tools,
+    lastTool,
+    model,
+    firstTs, lastTs,
+  }
+  detailCache.set(agentFile, { mtime: st.mtimeMs, size: st.size, detail })
+  return detail
+}
+
+// ---------------------------------------------------------------------------
+// Read journal.jsonl → ordered agents with started/done state, plus per-result
+// error flags (a critique result may carry {error:...}).
 function readState(runDir) {
   const j = path.join(runDir, 'journal.jsonl')
   let lines = []
-  try { lines = fs.readFileSync(j, 'utf8').split('\n').filter(Boolean) } catch { return [] }
-  const order = []          // agentIds in start order
+  try { lines = fs.readFileSync(j, 'utf8').split('\n') } catch { return [] }
+  const order = []
   const started = new Set()
   const done = new Set()
+  const errored = new Set()
   for (const ln of lines) {
-    let e; try { e = JSON.parse(ln) } catch { continue }
+    if (!ln) continue
+    let e
+    try { e = JSON.parse(ln) } catch { continue }
     if (!e.agentId) continue
     if (e.type === 'started') {
       if (!started.has(e.agentId)) { started.add(e.agentId); order.push(e.agentId) }
     } else if (e.type === 'result') {
       done.add(e.agentId)
+      const r = e.result
+      if (r && typeof r === 'object' && r.error) errored.add(e.agentId)
     }
   }
   return order.map((id) => {
     const af = path.join(runDir, 'agent-' + id + '.jsonl')
-    let size = 0, mtime = 0
-    try { const st = fs.statSync(af); size = st.size; mtime = st.mtimeMs } catch {}
-    return { id, done: done.has(id), label: labelFor(af), size, mtime }
+    let mtime = 0
+    try { mtime = fs.statSync(af).mtimeMs } catch {}
+    const cls = classifyCached(af)
+    return {
+      id,
+      file: af,
+      done: done.has(id),
+      errored: errored.has(id),
+      role: cls ? cls.role : 'agent',
+      engine: cls ? cls.engine : 'claude',
+      codexModel: cls ? cls.codexModel : null,
+      readable: !!cls,
+      mtime,
+    }
   })
 }
 
-// Derive a friendly label from the agent's prompt (first user message).
-const labelCache = new Map()
-function labelFor(agentFile) {
-  if (labelCache.has(agentFile)) return labelCache.get(agentFile)
-  let blob = ''
-  try { blob = fs.readFileSync(agentFile, 'utf8').slice(0, 8000) } catch {}
-  const isCodex = /drive the Codex CLI|--- BODY FOR CODEX ---/.test(blob)
-  const engine = isCodex ? '(codex)' : '(claude)'
-  let role = 'agent'
-  if (/Draft a concise/.test(blob)) role = 'draft-plan'
-  else if (/Critique (this|the)/.test(blob)) role = 'critique'
-  else if (/Address EACH|REVISED plan/.test(blob)) role = 'revise'
-  else if (/Carry out the agreed plan/.test(blob)) role = 'build'
-  else if (/Review this work/.test(blob)) role = 'review'
-  else if (/Reconcile your work/.test(blob)) role = 'reconcile'
-  const label = engine + ' ' + role
-  if (blob) labelCache.set(agentFile, label)   // only cache once the file has content
-  return label
+// ---------------------------------------------------------------------------
+// Dynamic expected-total as a STATE MACHINE / lower bound.
+//   - Base = 3 proven-always agents: Plan(draft-plan), Build(build), Review(reconcile).
+//   - For each OBSERVED started codex critique: +1 for its pending revise, and +1
+//     (once) for the eventual codex review.
+//   - If a critique's journal result carries an error: don't add its revise, and
+//     drop the not-yet-justified codex review (it gets skipped downstream).
+//   - INVARIANT: expected = max(expected, started) is always enforced last.
+function computeExpected(agents) {
+  let expected = 3 // draft-plan + build + reconcile, always present
+  let reviewAdded = false
+  let anyCritiqueErrored = false
+  for (const a of agents) {
+    if (a.engine === 'codex' && a.role === 'critique') {
+      if (a.errored) {
+        anyCritiqueErrored = true
+        continue // errored critique: no revise follows; review will be skipped
+      }
+      expected += 1 // its pending/observed revise
+      if (!reviewAdded) { expected += 1; reviewAdded = true } // the one codex review
+    }
+  }
+  // If a critique errored AND we never saw a healthy critique justify the review,
+  // the codex review is skipped downstream — keep expected from over-claiming it.
+  if (anyCritiqueErrored && !reviewAdded) {
+    // review not added in the first place; nothing to remove.
+  }
+  // INVARIANT: never below the number actually started.
+  expected = Math.max(expected, agents.length)
+  return expected
 }
 
-function bar(ratio, frame, running) {
-  const r = Math.max(0, Math.min(1, ratio))
-  if (running) {
-    // marching pulse: a 5-wide bright window sliding across, to signal activity.
+// round = max(1, critiqueCount) where critiqueCount = number of started codex
+// critique agents. Correct during both an active critique and an active revise.
+function inferRound(agents) {
+  let critiques = 0
+  for (const a of agents) {
+    if (a.engine === 'codex' && a.role === 'critique') critiques++
+  }
+  return Math.max(1, critiques)
+}
+
+// ---------------------------------------------------------------------------
+// Rendering helpers.
+function bar(frame, state) {
+  // state: 'done' | 'running' | 'queued'
+  if (state === 'running') {
     const pos = frame % (WIDTH + 5)
     let s = ''
-    for (let i = 0; i < WIDTH; i++) {
-      const inWindow = i >= pos - 4 && i <= pos
-      s += inWindow ? FILLED : EMPTY
-    }
+    for (let i = 0; i < WIDTH; i++) s += (i >= pos - 4 && i <= pos) ? FILLED : EMPTY
     return C.cyan + '[' + s + ']' + C.reset
   }
-  const n = Math.round(r * WIDTH)
-  const col = r >= 1 ? C.green : C.cyan
-  return col + '[' + FILLED.repeat(n) + EMPTY.repeat(WIDTH - n) + ']' + C.reset
+  if (state === 'done') return C.green + '[' + FILLED.repeat(WIDTH) + ']' + C.reset
+  return C.gray + '[' + EMPTY.repeat(WIDTH) + ']' + C.reset
 }
 
-function fmtAge(ms) {
+function fmtDur(ms) {
+  if (ms < 0) ms = 0
   const s = Math.floor(ms / 1000)
   if (s < 60) return s + 's'
   return Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0')
 }
+function fmtTokens(n) {
+  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k tok'
+  return n + ' tok'
+}
+function prettyModel(model) {
+  if (!model) return ''
+  let m = model
+  m = m.replace(/^claude-/, '')
+  // opus-4-8 → Opus 4.8 ; sonnet-4-6 → Sonnet 4.6
+  const mm = m.match(/^(opus|sonnet|haiku)-(\d+)-(\d+)/)
+  if (mm) return mm[1][0].toUpperCase() + mm[1].slice(1) + ' ' + mm[2] + '.' + mm[3]
+  return model
+}
+function engineLabel(a) {
+  if (a.engine === 'codex') {
+    const tag = a.codexModel ? '(codex · ' + a.codexModel + ')' : '(codex)'
+    return C.magenta + tag + C.reset + ' ' + a.role
+  }
+  return C.cyan + '(claude)' + C.reset + ' ' + a.role
+}
+// visible length (strip ANSI) for padding
+function vlen(s) { return s.replace(/\x1b\[[0-9;]*m/g, '').length }
+function padEndV(s, n) { const d = n - vlen(s); return d > 0 ? s + ' '.repeat(d) : s }
 
 let frame = 0
 function render(runDir) {
   const agents = readState(runDir)
   const now = Date.now()
   const doneCount = agents.filter((a) => a.done).length
-  const total = agents.length
-  const out = []
-  out.push(C.bold + 'hyperpower · live progress' + C.reset + '  ' +
-    C.dim + path.basename(runDir) + C.reset)
-  out.push(C.dim + '─'.repeat(58) + C.reset)
+  const started = agents.length
+  const expected = computeExpected(agents)
+  const round = inferRound(agents)
+
+  // earliest firstTs for total elapsed
+  let earliest = null
+  const detailById = new Map()
   for (const a of agents) {
-    const running = !a.done
-    const recent = now - a.mtime < 4000
-    const ratio = a.done ? 1 : 0
-    const icon = a.done ? C.green + '✔' + C.reset
-      : (recent ? C.cyan + '⏺' + C.reset : C.gray + '○' + C.reset)
-    const label = (a.label || '(agent)').padEnd(20)
-    const b = bar(ratio, frame, running && recent)
-    const meta = a.done ? C.green + 'done' + C.reset
-      : (recent ? C.cyan + 'running' + C.reset : C.gray + 'queued' + C.reset)
-    out.push(' ' + icon + ' ' + label + ' ' + b + '  ' + meta)
+    const d = readAgentDetail(a.file)
+    detailById.set(a.id, d)
+    if (d && d.firstTs) {
+      const t = Date.parse(d.firstTs)
+      if (!isNaN(t) && (earliest === null || t < earliest)) earliest = t
+    }
   }
-  if (total === 0) out.push(C.dim + ' waiting for agents…' + C.reset)
-  out.push(C.dim + '─'.repeat(58) + C.reset)
-  const allDone = total > 0 && doneCount === total
-  out.push(' ' + (allDone ? C.green + '✔ ' : '') +
-    C.bold + doneCount + '/' + total + ' agents' + C.reset +
-    (allDone ? C.green + ' · workflow complete' + C.reset : C.dim + ' · running…' + C.reset))
+
+  // group agents by phase, preserving run order within each phase.
+  const byPhase = new Map()
+  for (const p of PHASE_ORDER) byPhase.set(p, [])
+  for (const a of agents) byPhase.get(phaseOf(a.role)).push(a)
+
+  // current phase = phase of the last not-done agent, else last phase with agents.
+  let currentPhase = null
+  for (const a of agents) if (!a.done) { currentPhase = phaseOf(a.role); break }
+  if (!currentPhase) {
+    for (let i = PHASE_ORDER.length - 1; i >= 0; i--) {
+      if (byPhase.get(PHASE_ORDER[i]).length) { currentPhase = PHASE_ORDER[i]; break }
+    }
+  }
+
+  const out = []
+  out.push(C.bold + 'hyperpower · live dashboard' + C.reset + '  ' +
+    C.dim + path.basename(runDir) + C.reset)
+  out.push(C.dim + '─'.repeat(72) + C.reset)
+
+  for (const p of PHASE_ORDER) {
+    const list = byPhase.get(p)
+    const isBasePhase = (p === 'Plan' || p === 'Build' || p === 'Review')
+    if (!list.length) {
+      // Pending placeholder ONLY for base phases (proven to always exist). Never a
+      // fabricated agent with tokens/tools — just a dim "pending" marker.
+      if (isBasePhase) {
+        out.push(C.dim + p + C.reset)
+        out.push(C.dim + '    … ' + p.toLowerCase() + ' pending' + C.reset)
+      }
+      continue
+    }
+    // phase header, annotate Debate with inferred round
+    let header = p
+    if (p === 'Debate') header = p + C.reset + C.dim + ' · round ' + round + ' (inferred)'
+    out.push(C.dim + header + C.reset)
+    for (const a of list) {
+      const d = detailById.get(a.id)
+      const recent = now - a.mtime < 4000
+      const state = a.done ? 'done' : 'running'
+      const icon = a.done ? C.green + '✔' + C.reset
+        : (recent ? C.cyan + '⏺' + C.reset : C.gray + '○' + C.reset)
+      const label = padEndV(engineLabel(a), 28)
+      const b = bar(frame, a.done ? 'done' : (recent ? 'running' : 'queued'))
+
+      const parts = []
+      if (d && d.readable) {
+        parts.push(C.dim + fmtTokens(d.tokens) + C.reset)
+        parts.push(C.dim + d.tools + (d.tools === 1 ? ' tool' : ' tools') + C.reset)
+        if (d.lastTool) parts.push(C.gray + d.lastTool + C.reset)
+      }
+      // duration: real transcript span only
+      let dur = ''
+      if (d && d.firstTs) {
+        if (a.done && d.lastTs) dur = fmtDur(Date.parse(d.lastTs) - Date.parse(d.firstTs))
+        else if (!a.done) dur = fmtDur(now - Date.parse(d.firstTs))
+      }
+      if (dur) parts.push(C.dim + dur + C.reset)
+      const metaState = a.done
+        ? (a.errored ? C.yellow + 'error' + C.reset : C.green + 'done' + C.reset)
+        : (recent ? C.cyan + 'running' + C.reset : C.gray + 'queued' + C.reset)
+
+      out.push('    ' + icon + ' ' + label + ' ' + b + '  ' + metaState +
+        (parts.length ? '  ' + parts.join(' · ') : ''))
+    }
+  }
+  if (started === 0) out.push(C.dim + ' waiting for agents…' + C.reset)
+
+  out.push(C.dim + '─'.repeat(72) + C.reset)
+
+  // global progress bar (done/started ratio) — ACTIVITY/completion of started set.
+  const ratio = started ? doneCount / started : 0
+  const n = Math.round(ratio * WIDTH)
+  const allDone = started > 0 && doneCount === started
+  const gcol = allDone ? C.green : C.cyan
+  const gbar = gcol + '[' + FILLED.repeat(n) + EMPTY.repeat(WIDTH - n) + ']' + C.reset
+
+  let elapsed = ''
+  if (earliest !== null) elapsed = fmtDur(now - earliest)
+
+  const footerBits = []
+  footerBits.push(C.bold + doneCount + '/' + started + C.reset +
+    C.dim + ' (≈' + expected + ')' + C.reset + ' agents')
+  if (currentPhase) {
+    if (currentPhase === 'Debate') footerBits.push(C.dim + 'Debate · round ' + round + ' (inferred)' + C.reset)
+    else footerBits.push(C.dim + currentPhase + C.reset)
+  }
+  if (elapsed) footerBits.push(C.dim + elapsed + C.reset)
+
+  out.push(' ' + (allDone ? C.green + '✔ ' : '') + gbar + '  ' + footerBits.join(' · ') +
+    (allDone ? C.green + ' · complete' + C.reset : ''))
 
   if (TTY) process.stdout.write('\x1b[H\x1b[2J' + out.join('\n') + '\n')
   else process.stdout.write(out.join('\n') + '\n')
-  return { allDone, total }
+  return { allDone, started }
 }
 
 function main() {
@@ -164,20 +455,19 @@ function main() {
     process.exit(1)
   }
   if (TTY) process.stdout.write('\x1b[?25l') // hide cursor
-  const cleanup = () => { if (TTY) process.stdout.write('\x1b[?25h\n') ; process.exit(0) }
+  const cleanup = () => { if (TTY) process.stdout.write('\x1b[?25h\n'); process.exit(0) }
   process.on('SIGINT', cleanup); process.on('SIGTERM', cleanup)
 
   if (!TTY) { render(runDir); return }
 
   let doneSince = 0
   const tick = () => {
-    // re-attach if a newer run appeared
-    const latest = findRunDir(); if (latest) runDir = ARG && fs.existsSync(ARG) ? ARG : latest
-    const { allDone, total } = render(runDir)
+    const latest = findRunDir(); if (latest) runDir = (ARG && fs.existsSync(ARG)) ? ARG : latest
+    const { allDone, started } = render(runDir)
     frame++
-    if (allDone && total > 0) {
+    if (allDone && started > 0) {
       if (!doneSince) doneSince = Date.now()
-      else if (Date.now() - doneSince > 8000) cleanup() // linger 8s after completion
+      else if (Date.now() - doneSince > 8000) cleanup()
     } else { doneSince = 0 }
   }
   tick()

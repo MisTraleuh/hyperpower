@@ -1,9 +1,13 @@
 # hyperpower — Claude + Codex, one live table
 
 A Claude Code **plugin**. You type one thing; Claude and Codex split the work,
-**debate the plan**, implement, and cross-review — all surfaced as a single live
-progress table (the `/workflows` view) with distinct `(claude)` and `(codex)`
-nodes.
+**debate the plan**, implement, and cross-review — surfaced two ways: the native
+`/workflows` table (with distinct `(claude)` and `(codex)` nodes), **and**
+hyperpower's own full-screen live dashboard, `bin/hyperpower-progress`, which adds
+a real **per-agent activity bar**, real token/tool counts, real durations, and the
+Codex model parsed from each node's prompt. (The native `/workflows` row is drawn
+by Claude Code's own binary and can't be extended by a plugin — so the dashboard is
+a separate pane we fully control. See ["Live per-agent dashboard"](#live-per-agent-dashboard-our-own-view) and "Known limitations".)
 
 ```
 ▌ hyperpower: refacto auth middleware                  1/6 agents · 1m15s   /workflows
@@ -21,11 +25,13 @@ nodes.
 ```
 
 > **Progress.** The `1/6 agents · 1m15s` header and each node's `tok · tools · time`
-> are drawn by Claude Code's own native binary — a plugin cannot add a per-agent
-> progress bar in that row (the only per-node text a plugin controls is the label,
-> which is fixed once the agent spawns and can never update to show live or "done"
-> state). The one bar a plugin *can* draw is the **overall** `[████░░] %` line,
-> emitted via `log()` after each agent. See "Known limitations" below.
+> in the *native* `/workflows` row are drawn by Claude Code's own binary — a plugin
+> can't add a per-agent bar *in that row* (the only per-node text a plugin controls
+> there is the label, which is fixed once the agent spawns and never updates to show
+> live or "done" state). Inside `/workflows` the one bar a plugin can draw is the
+> **overall** `[████░░] %` line, emitted via `log()`. For a genuine **per-agent**
+> bar, hyperpower ships its own separate-pane dashboard — see
+> ["Live per-agent dashboard"](#live-per-agent-dashboard-our-own-view) and "Known limitations".
 
 ## Use
 
@@ -55,25 +61,54 @@ The "allow codex" decision is remembered for the rest of the session.
 The `(codex)` nodes shell out to the **Codex CLI** (`codex exec`). If `codex`
 isn't on the PATH, the workflow degrades to Claude-only automatically.
 
-## Live per-agent progress bar (our own view)
+## Live per-agent dashboard (our own view)
 
 Claude Code's `/workflows` table can't show a per-agent bar (its native binary draws
-that row and a plugin can't touch it — see below). So hyperpower ships its **own**
-live view that we fully control: `bin/hyperpower-progress`. It reads the workflow's
-real-time state files and renders an animated bar per agent:
+that row and a plugin can't touch it — see "Known limitations"). So hyperpower ships
+its **own** full-screen live view that we fully control: `bin/hyperpower-progress`.
+It reads the workflow's real-time state files and renders, per agent, an animated
+activity bar plus the real measurements pulled from the transcript:
 
 ```
-hyperpower · live progress  wf_2cfb98e7-ff9
-──────────────────────────────────────────────────────────
- ✔ (claude) draft-plan  [██████████████████████]  done
- ⏺ (codex) critique     [   ███   ▒ moving ▒    ]  running
- ○ (claude) build       [░░░░░░░░░░░░░░░░░░░░░░]  queued
-──────────────────────────────────────────────────────────
- 1/3 agents · running…
+hyperpower · live dashboard  wf_2cfb98e7-ff9
+────────────────────────────────────────────────────────────────────────
+Plan
+    ✔ (claude) draft-plan          [██████████████████████]  done     2k tok · 2 tools · StructuredOutput(do stuff) · 40s
+Debate · round 2 (inferred)
+    ✔ (codex · gpt-5.5) critique   [██████████████████████]  done     590 tok · 2 tools · StructuredOutput(false) · 22s
+    ✔ (claude) revise              [██████████████████████]  done     2k tok · 0 tools · 20s
+    ✔ (codex) critique             [██████████████████████]  error    120 tok · 1 tool · Bash(command -v codex) · 1s
+    ⏺ (claude) build               [   ████▒ moving ▒     ]  running  6k tok · 1 tool · Edit(/a) · 18s
+Review
+    … review pending
+────────────────────────────────────────────────────────────────────────
+ [███████████████████░░░]  4/5 (≈5) agents · Build · 2m41
 ```
 
-Empty → animated (marching) while running → full when done. Run it in a **separate
-pane** (e.g. a cmux split) next to your Claude session:
+Reading it:
+
+- **Engine + role.** `(claude)` nodes are **cyan**; `(codex)` nodes are **magenta**.
+  The Codex model — `(codex · gpt-5.5)` — is parsed from that node's prompt blob
+  (`codex exec … -m <model>`). A codex node with no extractable `-m` shows `(codex)`
+  with **no** model rather than a guess.
+- **The bar is an ACTIVITY animation, not a percentage.** Empty `░` = queued, a
+  marching pulse window = running, full **green** = done. There is no honest "%
+  complete" signal on disk, so we never fake one.
+- **tok / tools are real measurements** summed from the transcript — including
+  `0 tools` (shown, not hidden) when a node genuinely used none. They're omitted
+  only while a transcript can't be parsed yet.
+- **Durations are real transcript spans:** done = `lastTs − firstTs`, running =
+  `now − firstTs`. File mtime is used only to detect "recently active", never shown
+  as a duration.
+- **The round and the `(≈N)` expected total are inferred from observed state.**
+  Round = `max(1, critiqueCount)`. The expected total is a lower bound that grows as
+  healthy codex critiques appear (each adds its revise, plus one codex review) and
+  does not over-claim when a critique errors out — always kept `≥` the number of
+  agents actually started.
+- **Base phases that haven't started yet** (Plan / Build / Review always run) show a
+  dim `… <phase> pending` placeholder — never a fabricated agent with fake tokens.
+
+Run it in a **separate pane** (e.g. a cmux split) next to your Claude session:
 
 ```
 hyperpower-progress           # auto-attach to the most recent active run
@@ -82,7 +117,8 @@ hyperpower-progress <wf_dir>  # attach to a specific run dir
 
 It watches `~/.claude/projects/<proj>/<session>/subagents/workflows/wf_*/` —
 `journal.jsonl` (started/result per agent) and the live `agent-<id>.jsonl` files.
-Nothing to patch, nothing the auto-updater can wipe.
+Pure Node, no dependencies; non-TTY prints a single snapshot. Nothing to patch,
+nothing the auto-updater can wipe.
 
 ## Known limitations / honesty
 
@@ -91,14 +127,18 @@ Nothing to patch, nothing the auto-updater can wipe.
   the harness badge reflects the Claude model running the node. This is not
   fixable from a plugin. The `(codex · gpt-5.5)` text in the node **label** is the
   source of truth for which engine actually thought.
-- **No per-agent progress bar — and it cannot be added by a plugin.** The node row
+- **No per-agent bar *inside the native `/workflows` row*.** That row
   (`(claude) build  Opus 4.8  12k tok · 5 tools · 40s`) and the `X/Y agents · time`
   header are rendered by Claude Code's own **native binary** (a Bun-compiled
   executable under `~/.local/share/claude/versions/`). The only per-node text a
-  plugin controls is the **label**, which is fixed once the agent spawns and never
-  updates — so it can't show a bar that's empty→running→full per agent. A genuine
-  per-agent bar is a feature request for Claude Code itself. The single **overall**
-  bar (via `log()`) is the only honest progress bar a plugin can draw.
+  plugin controls *there* is the **label**, fixed once the agent spawns and never
+  updated — so it can't show an empty→running→full bar in that row, and the single
+  **overall** `log()` bar is the only progress bar a plugin can draw *into
+  `/workflows`*. A per-agent bar in the native row remains a feature request for
+  Claude Code itself. **But a genuine per-agent bar does exist** — in hyperpower's
+  separate-pane dashboard (`bin/hyperpower-progress`, see
+  ["Live per-agent dashboard"](#live-per-agent-dashboard-our-own-view)), which reads
+  the same real-time state files and renders an animated activity bar per agent.
 
 ## Requirements
 
