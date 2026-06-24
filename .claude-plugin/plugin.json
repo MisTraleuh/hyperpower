@@ -1,0 +1,9 @@
+{
+  "name": "mesh",
+  "version": "0.0.1",
+  "description": "Claude + Codex debate-and-build workflows, surfaced as one live table inside Claude Code.",
+  "author": {
+    "name": "nc",
+    "email": "nc@ailix.ai"
+  }
+}
