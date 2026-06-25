@@ -9,7 +9,7 @@
       "name": "hyperpower",
       "source": "./",
       "description": "Claude + Codex debate-and-build workflows, surfaced as one live table inside Claude Code.",
-      "version": "0.0.18"
+      "version": "0.0.19"
     }
   ]
 }

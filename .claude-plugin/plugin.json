@@ -1,6 +1,6 @@
 {
   "name": "hyperpower",
-  "version": "0.0.18",
+  "version": "0.0.19",
   "description": "Claude + Codex debate-and-build workflows, surfaced as one live table inside Claude Code.",
   "author": {
     "name": "nc",

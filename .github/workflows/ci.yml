@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntax check (all JS)
+        run: |
+          set -e
+          for f in bin/*.js mcp/*.js test/*.js; do
+            echo "node --check $f"
+            node --check "$f"
+          done
+
+      - name: Validate JSON manifests
+        run: |
+          set -e
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json hooks/hooks.json; do
+            echo "validate $f"
+            node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))"
+          done
+
+      - name: Unit tests (claims + screen + overlay)
+        run: |
+          set -e
+          node test/claims.test.js
+          node test/screen.test.js
+          node test/overlay.test.js
+
+      - name: MCP server tests (codex/claude steps skip when absent)
+        run: node test/mcp.test.js
+
+      - name: Claim-enforcement hook
+        run: |
+          set -e
+          RID="ci-$$"
+          node bin/hpw-claims.js claim "$RID" codex /tmp/a.ts >/dev/null
+          # claude editing codex's file must be denied (output contains "deny")
+          OUT=$(HYPERPOWER_RUN="$RID" HYPERPOWER_OWNER=claude node bin/hpw-claim-hook.js <<< '{"tool_name":"Edit","tool_input":{"file_path":"/tmp/a.ts"}}')
+          echo "$OUT" | grep -q '"permissionDecision":"deny"' && echo "PASS: conflict denied" || (echo "FAIL: not denied"; exit 1)
+          # no HYPERPOWER_RUN -> must allow (empty output)
+          OUT2=$(node bin/hpw-claim-hook.js <<< '{"tool_name":"Edit","tool_input":{"file_path":"/tmp/a.ts"}}')
+          [ -z "$OUT2" ] && echo "PASS: no-run allows" || (echo "FAIL: should allow"; exit 1)

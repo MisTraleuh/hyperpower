@@ -1,5 +1,7 @@
 # hyperpower — Claude + Codex, one live table
 
+[![ci](https://github.com/MisTraleuh/hyperpower/actions/workflows/ci.yml/badge.svg)](https://github.com/MisTraleuh/hyperpower/actions/workflows/ci.yml)
+
 A Claude Code **plugin**. You type one thing; Claude and Codex divide the work,
 **debate the plan**, implement, and cross-review — surfaced two ways: the native
 `/workflows` table (with distinct `(claude)` and `(codex)` nodes), **and**
@@ -116,6 +118,8 @@ background delegation**:
 | **Async background delegation** | ✅ | the MCP server's `delegate_to_codex` spawns `codex exec` **detached**, returns a `taskId` immediately, Claude keeps working, then `get_task_result`/`wait_for_tasks` collect it — true fire-and-forget |
 | **Parallel delegation** | ✅ | in **Dev**, Claude implements *while* Codex preps tests/risks **concurrently** via the runtime's `parallel()` |
 | **File claims (anti-clobber)** | ✅ | `bin/hpw-claims.js` atomic lock registry, exposed as MCP tools; conflicts return exit 3 (race-tested: 12 concurrent claimers → exactly 1 winner) |
+| **Enforced file claims (hook)** | ✅ | a PreToolUse hook (`bin/hpw-claim-hook.js`) BLOCKS an Edit/Write to a file claimed by another owner — opt-in via `HYPERPOWER_RUN`, never breaks normal editing |
+| **Strategy advice** | ✅ | `advise_strategy({task})` recommends who drives vs implements + whether to parallelize |
 | **Persistent run/task state** | ✅ | structured records under `~/.hyperpower/<run>/` (tasks + run log) |
 | **Auto-registered MCP server** | ✅ | `.mcp.json` ships with the plugin — tools load on install, usable from any Claude session (not only the workflow) |
 | Live per-agent progress bar in the native table | ✅ **unique** | the binary patch above — AgentMesh has nothing like it |

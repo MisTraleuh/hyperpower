@@ -91,7 +91,7 @@ async function main() {
   const tools = (list.result && list.result.tools) || []
   ok(tools.length >= 9, 'has >= 9 tools (got ' + tools.length + ')')
   const names = tools.map((t) => t.name)
-  const expected = ['delegate_to_codex', 'delegate_to_claude', 'get_task_result', 'wait_for_tasks', 'list_tasks', 'cross_review', 'claim_files', 'release_files', 'list_claims', 'record_task', 'read_run']
+  const expected = ['delegate_to_codex', 'delegate_to_claude', 'advise_strategy', 'get_task_result', 'wait_for_tasks', 'list_tasks', 'cross_review', 'claim_files', 'release_files', 'list_claims', 'record_task', 'read_run']
   ok(expected.every((n) => names.includes(n)), 'all expected tool names present')
   ok(tools.every((t) => t.inputSchema && t.inputSchema.type === 'object' && typeof t.inputSchema.properties === 'object'), 'every tool has a valid object inputSchema')
 
@@ -157,6 +157,12 @@ async function main() {
       ok(final.result && /CLAUDEPONG/.test(final.result), 'claude result contains CLAUDEPONG')
     }
   }
+
+  console.log('== 4c. advise_strategy (deterministic) ==')
+  const adv = await client.send('tools/call', { name: 'advise_strategy', arguments: { task: 'refactor the auth middleware across multiple files and add tests' } })
+  const advRec = JSON.parse(adv.result.content[0].text)
+  ok(advRec.classification && advRec.classification.implementation === true, 'advise: detects implementation work')
+  ok(advRec.parallelizable === true, 'advise: detects multi-file → parallelizable')
 
   console.log('== 5. clean shutdown ==')
   child.stdin.end()

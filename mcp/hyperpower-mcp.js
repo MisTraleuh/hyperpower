@@ -348,7 +348,58 @@ const TOOLS = [
     description: 'Read the persistent structured run state (run.json) for this run.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'advise_strategy',
+    description: 'Recommend how to split a task between Claude (architecture, critique, ' +
+      'synthesis, edge cases) and Codex (implementation, refactors, tests, diff analysis). ' +
+      'Heuristic + honest — no model call. Returns {driver, delegateTo, parallelizable, steps, rationale}.',
+    inputSchema: {
+      type: 'object',
+      properties: { task: { type: 'string', description: 'The task description.' } },
+      required: ['task'],
+    },
+  },
 ]
+
+// Deterministic strategy heuristic (no LLM): classify the task by keywords and
+// shape, recommend who drives vs implements, and whether work can parallelize.
+function adviseStrategy(task) {
+  const t = String(task || '').toLowerCase()
+  const has = (re) => re.test(t)
+  const implementation = has(/\b(implement|refactor|migrat|rename|add tests?|write tests?|fix the bug|port|codemod|boilerplate|scaffold)\b/)
+  const architecture = has(/\b(design|architect|plan|approach|trade-?off|should we|decide|review|audit|critique|security)\b/)
+  const multiFile = has(/\b(multiple files|across|whole|entire|several|each (file|module)|codebase|all the)\b/)
+  const hasCodex = !!codexPath()
+
+  let driver = 'claude', delegateTo = hasCodex ? 'codex' : null
+  const steps = []
+  if (architecture && !implementation) {
+    driver = 'claude'; delegateTo = null
+    steps.push('Claude handles it directly (design/critique work; little rote implementation).')
+  } else if (implementation && !architecture) {
+    driver = 'claude'; delegateTo = hasCodex ? 'codex' : null
+    if (hasCodex) steps.push('Claude frames the plan, delegate_to_codex for the implementation + tests, then cross_review.')
+    else steps.push('Claude implements (Codex not available).')
+  } else {
+    driver = 'claude'; delegateTo = hasCodex ? 'codex' : null
+    if (hasCodex) steps.push('Claude designs & debates the plan; delegate the heavy implementation to Codex; cross_review before shipping.')
+    else steps.push('Claude designs and implements (Codex not available).')
+  }
+  if (multiFile) steps.push('Multi-file: claim_files before parallel edits to avoid clobbering; split independent files across agents.')
+  steps.push('Persist with record_task; collect async work via wait_for_tasks/get_task_result.')
+
+  return {
+    driver,
+    delegateTo,
+    parallelizable: multiFile,
+    codexAvailable: hasCodex,
+    classification: { implementation, architecture, multiFile },
+    steps,
+    rationale: 'Claude is stronger at architecture/critique/synthesis; Codex at implementation/' +
+      'refactors/tests. ' + (hasCodex ? 'Both are available, so split by strength.' :
+      'Codex is NOT on PATH, so this stays Claude-only.'),
+  }
+}
 
 function wait(ms) { return new Promise((r) => setTimeout(r, ms)) }
 
@@ -418,6 +469,9 @@ async function callTool(name, args) {
 
     case 'read_run':
       return claims.readRun(RUN_ID)
+
+    case 'advise_strategy':
+      return adviseStrategy(args.task)
 
     default:
       throw { code: -32602, message: 'unknown tool: ' + name }
