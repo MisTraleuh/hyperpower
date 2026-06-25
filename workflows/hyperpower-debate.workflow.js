@@ -13,6 +13,7 @@ export const meta = {
 // --- args (robust: accepts object, JSON string, or plain string) -----------
 let task = 'No task provided'
 let allowCodex = false
+let quick = false // --quick/--lite: short Plan→Debate→Build→Review (skip Todo/Verify/Ship)
 ;(function parseArgs() {
   let a = args
   if (typeof a === 'string') {
@@ -21,6 +22,12 @@ let allowCodex = false
   if (a && typeof a === 'object') {
     task = a.task || a.prompt || task
     allowCodex = !!a.allowCodex
+    quick = !!a.quick
+  }
+  // Fallback: detect the flag in the task text if the caller forgot to set it.
+  if (/(^|\s)--(quick|lite)(\s|$)/.test(task)) {
+    quick = true
+    task = task.replace(/(^|\s)--(quick|lite)(\s|$)/g, ' ').trim()
   }
 })()
 
@@ -249,6 +256,42 @@ plan = await debateGate('plan', 'Plan', 'plan', plan, (obj, reasoning, cur) =>
     'OBJECTIONS:\n- ' + obj.join('\n- ') + '\n\nAddress each (accept/reject + reason), and ' +
     'return a STRONGER revised plan.\n\nCURRENT PLAN:\n' + cur + FINAL_TEXT_NOTE,
     'plan-revise', 'Plan', PLAN_SCHEMA).then((r) => r.plan))
+
+// === QUICK MODE: short Plan → Build → Review (skip Todo/Verify/Ship) =========
+// For small tasks the full skill-driven cycle is overkill (it can be ~20 agents).
+// --quick keeps the debated plan + parallel build + Codex review/reconcile only.
+if (quick) {
+  log('Quick mode: Plan → Build → Review (Todo/Verify/Ship skipped).')
+  phase('Dev')
+  const qTasks = [
+    () => claude(
+      'Carry out the agreed plan. Make the edits and run what you can; report changes with ' +
+      'exact file:line evidence.' + claimNote('claude', 'build') + '\n\nPLAN:\n' + plan,
+      'build', 'Dev'),
+  ]
+  if (codexAvailable) {
+    qTasks.push(() => codex(
+      'READ-ONLY prep IN PARALLEL with Claude: tests/edge cases/risks from the plan. ' +
+      'Do NOT edit files.\n\nPLAN:\n' + plan, 'build-prep', 'Dev'))
+  }
+  const qRes = await parallel(qTasks)
+  const qBuild = qRes[0]
+  phase('Ship')
+  let qReview = null
+  if (codexAvailable) {
+    qReview = await codex(
+      'Review this work against the plan. Flag correctness bugs, missed edge cases, or ' +
+      'unsupported claims, with file:line. Give your full reasoning.\n\nPLAN:\n' + plan +
+      '\n\nWORK:\n' + JSON.stringify(qBuild), 'final-review', 'Ship')
+    if (typeof qReview === 'string' && qReview.trim()) log('Codex review · ' + qReview.replace(/\s+/g, ' ').slice(0, 160))
+  }
+  const qVerdict = await claude(
+    'Reconcile your work with Codex\'s review. State the final answer, list which Codex points ' +
+    'you accept vs reject (with reasons), and flag anything still unverified.\n\nWORK:\n' +
+    JSON.stringify(qBuild) + '\n\nCODEX REVIEW:\n' + JSON.stringify(qReview), 'reconcile', 'Ship')
+  return { task, allowCodex, codexAvailable, runId: RUN_ID, quick: true, plan,
+    debate: debateLog, build: qBuild, codexReview: qReview, verdict: qVerdict }
+}
 
 // === 2. TODO (todo skill) → debate =========================================
 phase('Todo')
