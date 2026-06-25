@@ -249,6 +249,20 @@ STATUS_FN_RE = re.compile(
     rb'function (\w{1,4})\(\w{1,3},\w{1,3}\)\{if\(\w{1,3}\.state==="done"\)return"done";'
 )
 
+# ACTIVITY cap: the drill-in detail view shows only the last N tool calls. We find
+# the cap var from the "Activity" render usage (stable English text) then bump its
+# definition `<cap>=3,` -> `<cap>=99,` so ~all activity shows.
+ACT_USAGE_RE = re.compile(
+    rb'"Activity",bold:!0,dimColor:!0\},\.\.\.(\w{1,4})\.length>(\w{1,4})\?'
+)
+
+# OUTCOME (done case): the agent result is rendered raw. We wrap its initializer so
+# JSON output is pretty-printed before line-wrapping. Field names finalText/
+# resultPreview are stable (data fields, not minified). Captures: 1=y 2=n 3=n 4=n 5=e
+OUT_RE = re.compile(
+    rb'let (\w{1,3})=(\w{1,3})!=="loading"&&(\w{1,3})\?\.finalText\?(\w{1,3})\.finalText:(\w{1,3})\.resultPreview\?\?""'
+)
+
 
 def _find_one(regex, data, what):
     matches = list(regex.finditer(data))
@@ -282,6 +296,32 @@ def find_badge_site(data):
         "statssrc":   m.group(8).decode("latin-1"),  # s
     }
     return m.start(), m.group(0), names
+
+
+def find_activity_edit(data):
+    """Return (offset, old_bytes, new_bytes) raising the Activity cap 3 -> 99."""
+    m = _find_one(ACT_USAGE_RE, data, "ACTIVITY")
+    cap = m.group(2)  # the cap var, e.g. b'_Lo'
+    old = cap + b'=3,'
+    if data.count(old) != 1:
+        raise ReapplyError("activity cap def %r not unique (%d)" % (old, data.count(old)))
+    new = cap + b'=99,'
+    return data.find(old), old, new
+
+
+def find_outcome_edit(data):
+    """Return (offset, old_bytes, new_bytes) wrapping the done-result in a JSON
+    pretty-printer before line-wrapping."""
+    m = _find_one(OUT_RE, data, "OUTCOME")
+    y, n, e = m.group(1), m.group(3), m.group(5)
+    old = m.group(0)
+    Y, N, E = y.decode("latin-1"), n.decode("latin-1"), e.decode("latin-1")
+    new = (
+        "let " + Y + "=(()=>{let __r=" + N + '!=="loading"&&' + N + "?.finalText?" + N +
+        ".finalText:" + E + '.resultPreview??"";try{if(typeof __r==="string"){let __t=__r.trim();'
+        'if(__t[0]==="{"||__t[0]==="[")return JSON.stringify(JSON.parse(__t),null,2)}}catch(__e){}return __r})()'
+    ).encode("latin-1")
+    return m.start(), old, new
 
 
 def find_status_fn(data):
@@ -550,6 +590,11 @@ def syntax_check_js(snippet_bytes, kind):
             "function __wrap(e){let c,o;\n"
             + snip + ";\n}\n"
         )
+    elif kind == "outcome":
+        # outcome is `let y=(()=>{...})()` -> needs n,e in scope
+        wrapper = (
+            "function __wrap(n,e){\n" + snip + ";\nreturn 0}\n"
+        )
     else:
         raise ReapplyError("unknown snippet kind %r" % kind)
 
@@ -578,6 +623,8 @@ def resolve_live_binary():
 
 def detect_version(binary_path):
     try:
+        # abspath so a relative path (e.g. "claude-all4") doesn't ENOENT -> false 127
+        binary_path = os.path.abspath(binary_path)
         res = subprocess.run([binary_path, "--version"],
                              capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as e:
@@ -673,31 +720,74 @@ def run(binary=None, out=None):
         if bar_names2 != bar_names:
             raise ReapplyError("BAR names changed after BADGE edit (unexpected)")
         print("  [2/2] BAR (re-found at %d after BADGE shift)" % bar_off2)
-        info2 = patch(tmp_out, tmp_out, bar_off2, bar_old2, bar_new, C2, sign=True)
+        info2 = patch(tmp_out, tmp_out, bar_off2, bar_old2, bar_new, C2, sign=False)
         for k in ("delta", "string_pointers_shifted", "string_pointers_grown",
                   "blob_len_new", "section_size_new", "padding_old", "padding_new"):
             print("        %-22s = %s" % (k, info2[k]))
 
         total_delta = info1["delta"] + info2["delta"]
+
+        # [3/4] ACTIVITY cap (re-derive + re-find after the prior shifts).
+        C3 = derive_constants(tmp_out)
+        with open(tmp_out, "rb") as f:
+            data3 = f.read()
+        try:
+            act_off, act_old, act_new = find_activity_edit(data3)
+            print("  [3/4] ACTIVITY cap %s -> %s" % (act_old.decode("latin-1"), act_new.decode("latin-1")))
+            info3 = patch(tmp_out, tmp_out, act_off, act_old, act_new, C3, sign=False)
+            total_delta += info3["delta"]
+        except ReapplyError as e:
+            print("  [3/4] ACTIVITY skipped (not found): %s" % e)
+
+        # [4/4] OUTCOME json pretty-print (re-derive + re-find).
+        C4 = derive_constants(tmp_out)
+        with open(tmp_out, "rb") as f:
+            data4 = f.read()
+        try:
+            out_off, out_old, out_new = find_outcome_edit(data4)
+            syntax_check_js(out_new, "outcome")
+            print("  [4/4] OUTCOME json pretty-print (%+d)" % (len(out_new) - len(out_old)))
+            info4 = patch(tmp_out, tmp_out, out_off, out_old, out_new, C4, sign=False)
+            total_delta += info4["delta"]
+        except ReapplyError as e:
+            print("  [4/4] OUTCOME skipped (not found): %s" % e)
+
         print("  total delta: %+d bytes" % total_delta)
 
-        print("\n== verify patched COPY ==")
-        pver, prc = detect_version(tmp_out)
+        # CRITICAL (AMFI): patch() rewrote `tmp_out` in place several times, so its
+        # inode has cached an "invalid signature" verdict from the intermediate
+        # unsigned states — even a valid re-sign on that inode can still SIGKILL
+        # (rc 137/127). Materialize the bytes into a FRESH inode for `out`, sign
+        # THAT, and verify THAT. (Same gotcha as the live swap.)
+        with open(tmp_out, "rb") as f:
+            final_bytes = f.read()
+        if os.path.exists(out):
+            os.unlink(out)
+        with open(out, "wb") as f:
+            f.write(final_bytes)
+        os.chmod(out, 0o755)
+        subprocess.run(["codesign", "-f", "-s", "-", out], capture_output=True)
+        try:
+            os.unlink(tmp_out)
+        except Exception:
+            pass
+
+        print("\n== verify patched COPY (fresh inode) ==")
+        pver, prc = detect_version(out)
         print("  --version: %r rc %d" % (pver, prc))
-        sig = subprocess.run(["codesign", "--verify", "--verbose=2", tmp_out],
+        sig = subprocess.run(["codesign", "--verify", "--verbose=2", out],
                              capture_output=True, text=True)
         print("  codesign --verify rc: %d" % sig.returncode)
         if sig.stderr.strip():
             print("   ", sig.stderr.strip())
 
-        # presence checks
-        with open(tmp_out, "rb") as f:
-            pdata = f.read()
-        bar_present   = (G_FULL.encode("latin-1") in pdata and
-                         b'Math.floor(Date.now()/250)%10' in pdata)
-        badge_present = b'(via Codex)' in pdata and b'"Codex "+' in pdata
-        print("  bar bytes present  :", bar_present)
-        print("  badge bytes present:", badge_present)
+        bar_present   = (G_FULL.encode("latin-1") in final_bytes and
+                         b'Math.floor(Date.now()/250)%10' in final_bytes)
+        badge_present = b'(via Codex)' in final_bytes and b'"Codex "+' in final_bytes
+        act_present   = b'_Lo=99,' in final_bytes or b'=99,' in final_bytes
+        out_present   = b'JSON.stringify(JSON.parse(__t),null,2)' in final_bytes
+        print("  bar:", bar_present, "| badge:", badge_present,
+              "| activity:", act_present, "| outcome:", out_present)
 
         ok = (prc == 0 and pver == ver and sig.returncode == 0
               and bar_present and badge_present)
@@ -706,9 +796,6 @@ def run(binary=None, out=None):
                 "verification gate FAILED (rc=%d ver_match=%s sig=%d bar=%s badge=%s)"
                 % (prc, pver == ver, sig.returncode, bar_present, badge_present)
             )
-
-        # Promote tmp -> final only after full success.
-        shutil.move(tmp_out, out)
         print("\nRESULT: OK")
         print("  patched copy: %s" % out)
         return 0

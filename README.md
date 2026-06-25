@@ -62,6 +62,10 @@ hyperpower can inject it directly into the native binary:
   between the model badge and the `9.2k tok · …` metadata;
 - a **Codex-aware model badge**: `(codex)` rows show **"Codex gpt-5.5"** instead of
   the misleading proxy **"Sonnet 4.6"**.
+- **Full activity** in an agent's drill-in view (the cap of 3 tool calls → 99), so you
+  see everything an agent did, not just the last 3;
+- **Pretty-printed JSON** in the drill-in *Outcome* — a raw `{"agree":false,…}` result is
+  reformatted with indentation so it's actually readable.
 
 Claude Code ships as a Bun-compiled native binary (no plugin hook for that row), so
 this patches the binary's embedded JS. It is done safely: a **fresh-inode swap**

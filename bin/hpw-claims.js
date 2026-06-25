@@ -118,6 +118,20 @@ function recordTask(runId, rec) {
 }
 function readRun(runId) { return readJson(path.join(root(runId), 'run.json'), null) }
 
+// Read the plugin version straight from .claude-plugin/plugin.json.
+// INLINE parse on purpose — NOT readJson() (lines 47-49), which swallows errors and
+// returns a default; here a missing/malformed plugin.json MUST surface (the CLI
+// try/catch renders it as `error: <msg>` exit 1). Anchored on __dirname (the only
+// stable anchor for subagents): bin/ -> .. -> repo root -> .claude-plugin/plugin.json.
+function pluginVersion() {
+  const file = path.join(__dirname, '..', '.claude-plugin', 'plugin.json')
+  const obj = JSON.parse(fs.readFileSync(file, 'utf8')) // throws on missing/malformed -> caught by CLI try/catch
+  if (!obj || typeof obj !== 'object' || typeof obj.version !== 'string' || obj.version.length === 0) {
+    throw new Error('plugin.json: version must be a non-empty string')
+  }
+  return obj.version
+}
+
 module.exports = {
   root, claimFiles, releaseFiles, listClaims, recordTask, readRun, nowStamp,
 }
@@ -128,6 +142,7 @@ module.exports = {
 //   node hpw-claims.js release <runId> <owner> [file...]   -> JSON {released}
 //   node hpw-claims.js list    <runId>                     -> JSON claim table
 //   node hpw-claims.js record  <runId> <agent> <role> <result>
+//   node hpw-claims.js version                              -> plugin version (plain text, no runId)
 if (require.main === module) {
   const [cmd, runId, a, b, ...rest] = process.argv.slice(2)
   const out = (o) => process.stdout.write(JSON.stringify(o) + '\n')
@@ -142,8 +157,17 @@ if (require.main === module) {
     } else if (cmd === 'record') {
       const n = recordTask(runId, { agent: a, role: b, result: rest.join(' '), ts: nowStamp() })
       out({ recorded: n })
+    } else if (cmd === 'version') {
+      // CLI policy: version takes no operands; any trailing args are ignored
+      // (consistent with claim/release/list/record, which also ignore surplus
+      // positional args). Intentional — not incidental. See 1.4 for the lock.
+      // Plain text (NOT out(), which JSON.stringifies): stdout must be exactly `<version>\n`.
+      process.stdout.write(pluginVersion() + '\n')
     } else {
-      process.stderr.write('usage: claim|release|list|record <runId> ...\n'); process.exit(2)
+      process.stderr.write(
+        'usage: claim|release|list|record <runId> ...\n' +
+        '       version                       (no args; prints plugin version)\n'
+      ); process.exit(2)
     }
   } catch (e) { process.stderr.write('error: ' + e.message + '\n'); process.exit(1) }
 }
