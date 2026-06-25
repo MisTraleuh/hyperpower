@@ -45,8 +45,9 @@ a separate pane we fully control. See ["Live per-agent dashboard"](#live-per-age
 - **Big task** (multi-file, refactor, tests, multi-module) → hyperpower **asks** whether
   to bring Codex into the loop, then runs the **debate** workflow.
 - Force it either way: `/hyperpower <task> --codex` or `/hyperpower <task> --no-codex`.
-- **`--quick`** (or `--lite`): short **Plan→Debate→Build→Review** for small tasks —
-  skips the Todo/Verify/Ship skill phases (the full cycle can be ~20 agents).
+- **Cycle depth is automatic**: the workflow's first agent self-assesses the task and
+  picks **quick** (short Plan→Debate→Build→Review) or **full** (Plan→Todo→Dev→Verify→Ship).
+  Override with `--quick`/`--lite` (force short) or `--full`/`--deep` (force full).
 
 When Codex is in the loop the debate is **real**: Codex must surface concrete
 objections on the first pass (no rubber-stamping), and the plan goes through at

@@ -34,15 +34,15 @@ Call the **Workflow** tool with:
 - `args`: a real JSON **object** (NOT a stringified JSON):
   `{ "task": "<the cleaned task text, flags stripped>", "allowCodex": <true|false>, "quick": <true|false> }`
 
-**The `--quick` (a.k.a. `--lite`) flag — pick the cycle depth:**
-- If the arguments contain `--quick` or `--lite`, set `quick = true`. This runs the
-  SHORT path: **Plan → Debate → Build → Review** (skips the Todo/Verify/Ship skill
-  phases). Use it for small, self-contained tasks — the full cycle can be ~20 agents
-  and is overkill for a one-liner.
-- Otherwise `quick = false` → the full skill-driven cycle **Plan → Todo → Dev →
-  Verify → Ship** (debate at every gate, correction loop). Default for real features.
-- If unsure and the task is clearly small (one file, a flag, a tiny fix), prefer
-  `quick = true`. Strip the flag from the task text either way.
+**Cycle depth — the workflow decides on its own.**
+By default DON'T set `quick`/`full` — the workflow's first agent self-assesses the
+task complexity and picks **quick** (short Plan→Debate→Build→Review) or **full**
+(Plan→Todo→Dev→Verify→Ship). You don't have to guess.
+
+Only set a flag to OVERRIDE that decision:
+- `--quick` / `--lite` in the args → pass `"quick": true` (force the short cycle).
+- `--full` / `--deep` in the args → pass `"full": true` (force the full cycle).
+Strip the flag from the task text. With no flag, pass neither — let it auto-decide.
 
 > ⚠️ Pass `args` as an actual object. If you pass a JSON *string*
 > (`"{\"task\":...}"`), the script sees `args.task` as undefined and runs with

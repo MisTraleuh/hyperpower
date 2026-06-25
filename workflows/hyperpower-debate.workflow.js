@@ -13,7 +13,9 @@ export const meta = {
 // --- args (robust: accepts object, JSON string, or plain string) -----------
 let task = 'No task provided'
 let allowCodex = false
-let quick = false // --quick/--lite: short Plan→Debate→Build→Review (skip Todo/Verify/Ship)
+// Tri-state mode: forceMode = 'quick' | 'full' | null (null = let the workflow
+// decide intelligently from the plan's own complexity assessment).
+let forceMode = null
 ;(function parseArgs() {
   let a = args
   if (typeof a === 'string') {
@@ -22,14 +24,15 @@ let quick = false // --quick/--lite: short Plan→Debate→Build→Review (skip 
   if (a && typeof a === 'object') {
     task = a.task || a.prompt || task
     allowCodex = !!a.allowCodex
-    quick = !!a.quick
+    if (a.quick === true) forceMode = 'quick'
+    if (a.full === true || a.deep === true) forceMode = 'full'
+    if (typeof a.mode === 'string' && /^(quick|full)$/.test(a.mode)) forceMode = a.mode
   }
-  // Fallback: detect the flag in the task text if the caller forgot to set it.
-  if (/(^|\s)--(quick|lite)(\s|$)/.test(task)) {
-    quick = true
-    task = task.replace(/(^|\s)--(quick|lite)(\s|$)/g, ' ').trim()
-  }
+  // Fallback: detect an explicit flag in the task text.
+  if (/(^|\s)--(quick|lite)(\s|$)/.test(task)) { forceMode = 'quick'; task = task.replace(/(^|\s)--(quick|lite)(\s|$)/g, ' ').trim() }
+  if (/(^|\s)--(full|deep)(\s|$)/.test(task)) { forceMode = 'full'; task = task.replace(/(^|\s)--(full|deep)(\s|$)/g, ' ').trim() }
 })()
+let quick = false // resolved after the plan's self-assessment (see below)
 
 // --- participants ----------------------------------------------------------
 // A (codex) node is a Claude subagent that drives the Codex CLI headlessly. Its
@@ -166,6 +169,17 @@ const PLAN_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['plan'],
   properties: { plan: { type: 'string', description: 'The step-by-step plan' } },
 }
+// Initial plan ALSO self-assesses complexity, so the workflow can pick its own
+// depth (quick vs full) without the user passing a flag.
+const PLAN0_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['plan', 'complexity', 'complexityReason'],
+  properties: {
+    plan: { type: 'string', description: 'The step-by-step plan' },
+    complexity: { type: 'string', enum: ['quick', 'full'],
+      description: 'quick = small/self-contained (≈1 file, a flag, a tiny fix) → short cycle; full = a real feature/refactor/migration, multi-file, or needs tests+verification → full skill-driven cycle' },
+    complexityReason: { type: 'string', description: 'One line: why this complexity.' },
+  },
+}
 const CRITIQUE_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['agree', 'objections', 'reasoning'],
   properties: {
@@ -242,14 +256,27 @@ if (task === 'No task provided') log('WARNING: empty task — check that args wa
 agentsTotal = 6 + (allowCodex ? 6 : 0)
 log(renderBar(0, agentsTotal) + '  0/' + agentsTotal + ' agents · starting')
 
-// === 1. PLAN → debate =======================================================
+// === 1. PLAN (+ self-assessed complexity) → decide depth → debate ===========
 phase('Plan')
-let plan = (await claude(
+const plan0 = await claude(
   'Draft a rigorous, numbered plan to solve this task — good enough to survive an ' +
   'adversarial review by a second engine. Be specific (what/where/why), call out risks, ' +
-  'edge cases, assumptions, and how to verify success. No code yet.\n\n' + task + FINAL_TEXT_NOTE,
-  'draft-plan', 'Plan', PLAN_SCHEMA
-)).plan
+  'edge cases, assumptions, and how to verify success. No code yet.\n\n' +
+  'ALSO assess this task\'s complexity: "quick" if it is small and self-contained ' +
+  '(≈1 file, a flag, a tiny fix — a full ticket/verify/ship cycle would be overkill), or ' +
+  '"full" if it is a real feature/refactor/migration, touches multiple files, or needs ' +
+  'tests + verification. Be honest — most one-off changes are "quick".\n\n' + task + FINAL_TEXT_NOTE,
+  'draft-plan', 'Plan', PLAN0_SCHEMA
+)
+let plan = plan0.plan
+// Resolve depth: explicit flag wins; otherwise the plan's own assessment decides.
+if (forceMode) {
+  quick = forceMode === 'quick'
+  log('Mode: ' + forceMode + ' (forced by flag).')
+} else {
+  quick = plan0.complexity === 'quick'
+  log('Mode: ' + (quick ? 'quick' : 'full') + ' (auto) — ' + (plan0.complexityReason || plan0.complexity))
+}
 plan = await debateGate('plan', 'Plan', 'plan', plan, (obj, reasoning, cur) =>
   claude('Codex critiqued your plan. Engage seriously.\n\n' +
     (reasoning ? "CODEX REASONING:\n" + reasoning + '\n\n' : '') +
