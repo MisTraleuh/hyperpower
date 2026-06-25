@@ -6,7 +6,7 @@
  * Gives hyperpower the ASYNC multi-agent coordination AgentMesh has: Claude
  * delegates work to Codex in the BACKGROUND, keeps working, and collects the
  * result later. Pure Node — JSON-RPC 2.0 implemented by hand over stdio using
- * LSP-style `Content-Length:` framing (the MCP stdio standard).
+ * Newline-delimited JSON framing (the MCP stdio standard).
  *
  * Tools:
  *   delegate_to_codex   async — spawn a detached `codex exec`, return {taskId}
@@ -431,8 +431,12 @@ async function handleRequest(msg) {
   const { id, method, params } = msg
 
   if (method === 'initialize') {
+    // Echo the client's requested protocol version so strict/newer clients (e.g.
+    // recent Claude Code) accept the handshake instead of failing to connect.
+    const wanted = (params && typeof params.protocolVersion === 'string')
+      ? params.protocolVersion : '2024-11-05'
     return ok(id, {
-      protocolVersion: '2024-11-05',
+      protocolVersion: wanted,
       capabilities: { tools: {} },
       serverInfo: { name: 'hyperpower', version: '0.1.0' },
     })
@@ -474,48 +478,57 @@ function ok(id, result) { return { jsonrpc: '2.0', id, result } }
 function err(id, code, message) { return { jsonrpc: '2.0', id, error: { code, message } } }
 
 // ---------------------------------------------------------------------------
-// Content-Length framed transport over stdio
+// Newline-delimited JSON transport over stdio — the MCP stdio standard.
 //
-// Each message: `Content-Length: <bytes>\r\n\r\n<utf8 json payload>`.
-// We buffer raw bytes (Buffer), parse a header block once \r\n\r\n is present,
-// then wait for exactly <bytes> UTF-8 bytes of body before dispatching.
+// Per the MCP spec, stdio messages are JSON objects DELIMITED BY NEWLINES and must
+// not contain embedded newlines. (Claude Code's client sends exactly this — NOT
+// LSP-style `Content-Length:` framing.) We write `JSON.stringify(msg) + "\n"`, and
+// read line-by-line. For robustness we ALSO accept legacy Content-Length frames if
+// a client happens to send them.
 // ---------------------------------------------------------------------------
 function send(obj) {
-  const json = JSON.stringify(obj)
-  const body = Buffer.from(json, 'utf8')
-  const header = Buffer.from('Content-Length: ' + body.length + '\r\n\r\n', 'ascii')
-  process.stdout.write(Buffer.concat([header, body]))
+  process.stdout.write(JSON.stringify(obj) + '\n')
 }
 
 let buf = Buffer.alloc(0)
 
 function pump() {
   for (;;) {
-    const sep = buf.indexOf('\r\n\r\n')
-    if (sep === -1) return // need more header bytes
-    const header = buf.slice(0, sep).toString('ascii')
-    let len = -1
-    for (const line of header.split('\r\n')) {
-      const m = /^content-length:\s*(\d+)\s*$/i.exec(line)
-      if (m) len = parseInt(m[1], 10)
-    }
-    if (len < 0) {
-      // malformed header block: drop it and keep going
-      buf = buf.slice(sep + 4)
+    // Legacy Content-Length frame? (only if the buffer literally starts with it)
+    if (/^content-length:/i.test(buf.slice(0, 16).toString('ascii'))) {
+      const sep = buf.indexOf('\r\n\r\n')
+      if (sep === -1) return
+      const header = buf.slice(0, sep).toString('ascii')
+      let len = -1
+      for (const line of header.split('\r\n')) {
+        const m = /^content-length:\s*(\d+)\s*$/i.exec(line)
+        if (m) len = parseInt(m[1], 10)
+      }
+      const bodyStart = sep + 4
+      if (len < 0) { buf = buf.slice(bodyStart); continue }
+      if (buf.length - bodyStart < len) return
+      const body = buf.slice(bodyStart, bodyStart + len)
+      buf = buf.slice(bodyStart + len)
+      parseAndDispatch(body)
       continue
     }
-    const bodyStart = sep + 4
-    if (buf.length - bodyStart < len) return // need more body bytes
-    const body = buf.slice(bodyStart, bodyStart + len)
-    buf = buf.slice(bodyStart + len)
-
-    let msg
-    try { msg = JSON.parse(body.toString('utf8')) } catch {
-      send(err(null, -32700, 'Parse error'))
-      continue
-    }
-    dispatch(msg)
+    // Newline-delimited JSON (the normal path).
+    const nl = buf.indexOf(0x0a) // '\n'
+    if (nl === -1) return // need a full line
+    const line = buf.slice(0, nl)
+    buf = buf.slice(nl + 1)
+    const trimmed = line.toString('utf8').trim()
+    if (trimmed) parseAndDispatch(Buffer.from(trimmed, 'utf8'))
   }
+}
+
+function parseAndDispatch(body) {
+  let msg
+  try { msg = JSON.parse(body.toString('utf8')) } catch {
+    send(err(null, -32700, 'Parse error'))
+    return
+  }
+  dispatch(msg)
 }
 
 function dispatch(msg) {

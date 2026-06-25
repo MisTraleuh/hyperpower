@@ -23,25 +23,19 @@ function ok(cond, label) {
   else { fail++; console.log('  FAIL: ' + label) }
 }
 
-// --- Content-Length framed client over the child's stdio -------------------
+// --- Newline-delimited JSON client over the child's stdio (MCP stdio standard) --
 function makeClient(child) {
-  let buf = Buffer.alloc(0)
+  let buf = ''
   const waiters = new Map() // id -> resolve
   child.stdout.on('data', (chunk) => {
-    buf = Buffer.concat([buf, chunk])
-    for (;;) {
-      const sep = buf.indexOf('\r\n\r\n')
-      if (sep === -1) break
-      const header = buf.slice(0, sep).toString('ascii')
-      const m = /content-length:\s*(\d+)/i.exec(header)
-      if (!m) { buf = buf.slice(sep + 4); continue }
-      const len = parseInt(m[1], 10)
-      const start = sep + 4
-      if (buf.length - start < len) break
-      const body = buf.slice(start, start + len).toString('utf8')
-      buf = buf.slice(start + len)
+    buf += chunk.toString('utf8')
+    let nl
+    while ((nl = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, nl).trim()
+      buf = buf.slice(nl + 1)
+      if (!line) continue
       let msg
-      try { msg = JSON.parse(body) } catch { continue }
+      try { msg = JSON.parse(line) } catch { continue }
       if (msg.id !== undefined && msg.id !== null && waiters.has(msg.id)) {
         waiters.get(msg.id)(msg)
         waiters.delete(msg.id)
@@ -54,9 +48,7 @@ function makeClient(child) {
     if (params !== undefined) obj.params = params
     let id
     if (!isNotification) { id = nextId++; obj.id = id }
-    const body = Buffer.from(JSON.stringify(obj), 'utf8')
-    const header = Buffer.from('Content-Length: ' + body.length + '\r\n\r\n', 'ascii')
-    child.stdin.write(Buffer.concat([header, body]))
+    child.stdin.write(JSON.stringify(obj) + '\n')
     if (isNotification) return Promise.resolve(null)
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('timeout waiting for id ' + id + ' (' + method + ')')), 200000)
