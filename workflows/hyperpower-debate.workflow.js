@@ -4,7 +4,7 @@ export const meta = {
   phases: [
     { title: 'Plan',      detail: 'Claude drafts an initial plan' },
     { title: 'Debate',    detail: 'Codex critiques, Claude revises, until they agree' },
-    { title: 'Build',     detail: 'Claude implements; Codex stays read-only' },
+    { title: 'Build',     detail: 'Claude implements WHILE Codex preps in parallel (file-claim safe)' },
     { title: 'Review',    detail: 'Codex reviews the result, Claude reconciles' },
   ],
 }
@@ -122,6 +122,26 @@ function claude(prompt, label, phase, schema) {
   return Promise.resolve(p).then((r) => { bumpProgress('(claude) ' + label); return r })
 }
 
+// --- orchestration primitives (beat AgentMesh, stay a plugin) ---------------
+// The workflow script is sandboxed (no fs/require), but the AGENTS it spawns have
+// Bash. So file-claim coordination + persistent run state are driven by telling
+// each agent to call our CLI `node bin/hpw-claims.js` (see bin/hpw-claims.js).
+// A stable per-run id namespaces the claim table + run record under ~/.hyperpower.
+const RUN_ID = (args && typeof args === 'object' && args.runId) ? String(args.runId)
+  : 'hpw-' + Math.abs((task || 'x').split('').reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7)).toString(36)
+const CLAIMS_CLI = 'node "$CLAUDE_PLUGIN_ROOT/bin/hpw-claims.js"'
+// Instruction block appended to any agent that may EDIT files, so parallel agents
+// never clobber each other: claim → (back off on conflict) → edit → release → record.
+function claimNote(owner, role) {
+  return '\n\nFILE-CLAIM PROTOCOL (you may run in parallel with another engine — do NOT clobber it):\n' +
+    '1. BEFORE editing any file, claim it:  ' + CLAIMS_CLI + ' claim ' + RUN_ID + ' ' + owner + ' <file...>\n' +
+    '   (if $CLAUDE_PLUGIN_ROOT is unset, use the repo path to bin/hpw-claims.js). Exit code 3 = a\n' +
+    '   conflict: that file is owned by the other agent — do NOT touch it, work around it or wait.\n' +
+    '2. AFTER you finish editing, release:   ' + CLAIMS_CLI + ' release ' + RUN_ID + ' ' + owner + ' <file...>\n' +
+    '3. When done, record your task:         ' + CLAIMS_CLI + ' record ' + RUN_ID + ' ' + owner + ' ' + role + ' "<one-line result>"\n' +
+    'Only claimed files are yours to write. Honor conflicts strictly.'
+}
+
 // Drill-in body fix: an agent whose final turn is a StructuredOutput call produces
 // an EMPTY finalText, so the harness drill-in panel for that node shows nothing.
 // We append this instruction to every schema'd prompt so the agent ALSO prints a
@@ -232,14 +252,38 @@ if (allowCodex) {
   }
 }
 
-// --- Build (Claude implements in-repo; Codex stays read-only) --------------
+// --- Build (PARALLEL: Claude implements WHILE Codex prepares, no clobber) ---
+// Unlike a strictly sequential pipeline, here Claude's implementation and Codex's
+// independent prep run CONCURRENTLY (the runtime's parallel()). Claude WRITES files
+// (claiming each first); Codex stays READ-ONLY and prepares a test/risk checklist
+// from the plan, so its work is genuinely independent — no false parallelism, and
+// the file-claim registry guarantees no clobber if a future variant lets both write.
 phase('Build')
-const build = await claude(
-  'Carry out the agreed plan. If it is an investigation, report findings with exact ' +
-  'file:line evidence. If it requires code, make the edits and run tests. Return a ' +
-  'summary of what you found / changed.\n\nPLAN:\n' + plan,
-  'build', 'Build'
-)
+let buildPrep = null
+const buildTasks = [
+  () => claude(
+    'Carry out the agreed plan. If it requires code, make the edits and run tests; report ' +
+    'findings with exact file:line evidence. Return a summary of what you found / changed.\n\n' +
+    'PLAN:\n' + plan + claimNote('claude', 'build'),
+    'build', 'Build'
+  ),
+]
+if (codexAvailable) {
+  buildTasks.push(() => codex(
+    'READ-ONLY prep IN PARALLEL with Claude\'s implementation. Do NOT edit files. From the ' +
+    'plan, produce a concise checklist of: tests that should exist, edge cases to verify, and ' +
+    'the top risks to watch during implementation. This runs while Claude builds.\n\nPLAN:\n' + plan,
+    'build-prep', 'Build'
+  ))
+}
+const buildResults = await parallel(buildTasks)
+const build = buildResults[0]
+if (buildResults.length > 1 && buildResults[1]) {
+  buildPrep = buildResults[1]
+  if (typeof buildPrep === 'string' && buildPrep.trim()) {
+    log('Codex build-prep · ' + buildPrep.replace(/\s+/g, ' ').slice(0, 140))
+  }
+}
 
 // --- Review (Codex reviews the result; Claude reconciles) ------------------
 phase('Review')
@@ -250,6 +294,7 @@ if (codexAvailable) {
     'Review this work against the plan THOROUGHLY. Flag correctness bugs, missed edge ' +
     'cases, or unsupported claims, with file:line where possible. Give your full reasoning ' +
     '— this review is shown to the user as Codex\'s trace.\n\nPLAN:\n' + plan +
+    (buildPrep ? '\n\nYOUR EARLIER BUILD-PREP CHECKLIST (verify it was honored):\n' + JSON.stringify(buildPrep) : '') +
     '\n\nWORK:\n' + JSON.stringify(build),
     'review', 'Review'
   )
@@ -264,4 +309,4 @@ const verdict = await claude(
   'reconcile', 'Review'
 )
 
-return { task, allowCodex, codexAvailable, plan, debate: debateLog, build, codexReview, verdict }
+return { task, allowCodex, codexAvailable, runId: RUN_ID, plan, debate: debateLog, buildPrep, build, codexReview, verdict }

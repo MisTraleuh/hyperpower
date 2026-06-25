@@ -103,6 +103,34 @@ Restart Claude Code, run `/hyperpower <task> --codex`, open `/workflows` → bar
 The `(codex)` nodes shell out to the **Codex CLI** (`codex exec`). If `codex`
 isn't on the PATH, the workflow degrades to Claude-only automatically.
 
+## Orchestration (vs AgentMesh)
+
+[AgentMesh](https://github.com/KuciaGuillaume/AgentMesh) is an MCP server that
+coordinates Claude Code + Codex. hyperpower stays a **plugin** (no separate server —
+the Workflow runtime already runs agents concurrently) and now matches its core
+orchestration primitives:
+
+| Primitive | hyperpower | how |
+| --- | :---: | --- |
+| Claude+Codex debate / cross-review | ✅ | the debate workflow (Plan → Debate → Build → Review) |
+| **Parallel delegation** | ✅ | in **Build**, Claude implements *while* Codex preps tests/risks **concurrently** via the runtime's `parallel()` — not sequential |
+| **File claims (anti-clobber)** | ✅ | `bin/hpw-claims.js` — an atomic lock registry; agents `claim` files before editing, conflicts return exit 3 (race-tested: 12 concurrent claimers → exactly 1 winner) |
+| **Persistent run/task state** | ✅ | structured records under `~/.hyperpower/<run>/run.json` (who/what/when/result), alongside the harness `journal.jsonl` |
+| Live per-agent progress bar in the native table | ✅ **unique** | the binary patch above — AgentMesh has nothing like it |
+
+The file-claim CLI (agents call it from Bash, since the workflow script itself is
+sandboxed):
+
+```bash
+node bin/hpw-claims.js claim   <run> <owner> <file...>   # exit 3 on conflict
+node bin/hpw-claims.js release <run> <owner> [file...]
+node bin/hpw-claims.js list    <run>
+node bin/hpw-claims.js record  <run> <agent> <role> "<result>"
+```
+
+State lives under `~/.hyperpower/` (override with `HYPERPOWER_HOME`). Pure Node, no
+deps, everything on your machine.
+
 ## Live per-agent dashboard (our own view)
 
 Claude Code's `/workflows` table can't show a per-agent bar (its native binary draws
