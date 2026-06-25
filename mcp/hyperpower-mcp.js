@@ -68,28 +68,33 @@ function newTaskId() {
 }
 function nowIso() { try { return new Date().toISOString() } catch { return null } }
 
-function codexPath() {
-  const r = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['codex'], { encoding: 'utf8' })
+function binPath(name) {
+  const r = spawnSync(process.platform === 'win32' ? 'where' : 'which', [name], { encoding: 'utf8' })
   if (r.status === 0 && r.stdout && r.stdout.trim()) return r.stdout.trim().split(/\r?\n/)[0]
   return null
 }
+function codexPath() { return binPath('codex') }
+function claudePath() { return binPath('claude') }
 
 // ---------------------------------------------------------------------------
-// Background codex runner.
+// Generic background runner.
 //
 // We can't keep a child handle around (the server may answer many requests and
 // the parent shouldn't block), so we spawn a tiny detached Node wrapper that:
-//   1. runs `codex exec ... -o <outfile>` with the prompt on stdin (a temp file),
+//   1. runs <cmd> <args...>, feeding the prompt over stdin (from inFile),
 //   2. on exit, atomically writes status:done+result (or status:error) into the
 //      task json.
+// The result text is read from outFile (e.g. codex `-o`) if `outFile` is set,
+// otherwise from captured stdout (e.g. claude `-p ... --output-format text`).
 // The wrapper is generated to a temp file and executed with `node`.
+//
+// cfg: { taskFile, cmd, args, inFile, outFile|null, label }
 // ---------------------------------------------------------------------------
 const RUNNER_SRC = `
 'use strict'
 const fs = require('fs')
 const { spawn } = require('child_process')
 const cfg = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
-// cfg: { taskFile, outFile, inFile, codex, model, kind }
 
 function readTask() { try { return JSON.parse(fs.readFileSync(cfg.taskFile, 'utf8')) } catch { return {} } }
 function writeTask(patch) {
@@ -100,19 +105,8 @@ function writeTask(patch) {
   fs.renameSync(tmp, cfg.taskFile)
 }
 
-const args = [
-  'exec',
-  '--skip-git-repo-check',
-  '--sandbox', 'read-only',
-  '--ephemeral',
-  '--color', 'never',
-  '-m', cfg.model,
-  '-o', cfg.outFile,
-  '-',                       // read prompt from stdin
-]
-
 const input = fs.createReadStream(cfg.inFile)
-const child = spawn(cfg.codex, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+const child = spawn(cfg.cmd, cfg.args, { stdio: ['pipe', 'pipe', 'pipe'] })
 input.pipe(child.stdin)
 
 let stderr = ''
@@ -127,35 +121,34 @@ child.on('error', (err) => {
 
 child.on('close', (code) => {
   let result = null
-  try { result = fs.readFileSync(cfg.outFile, 'utf8') } catch {}
+  if (cfg.outFile) {
+    try { result = fs.readFileSync(cfg.outFile, 'utf8') } catch {}
+  }
   if (result == null || result.trim() === '') {
-    // fall back to captured stdout if -o produced nothing
+    // fall back to captured stdout if outFile is unset or produced nothing
     result = stdout
   }
   result = (result || '').trim()
   try { fs.unlinkSync(cfg.inFile) } catch {}
-  try { fs.unlinkSync(cfg.outFile) } catch {}
+  if (cfg.outFile) { try { fs.unlinkSync(cfg.outFile) } catch {} }
   if (code === 0) {
     writeTask({ status: 'done', result: result, finishedAt: new Date().toISOString() })
   } else {
-    writeTask({ status: 'error', error: 'codex exited ' + code + (stderr ? (': ' + stderr.trim().slice(-2000)) : ''), result: result || null, finishedAt: new Date().toISOString() })
+    writeTask({ status: 'error', error: (cfg.label || cfg.cmd) + ' exited ' + code + (stderr ? (': ' + stderr.trim().slice(-2000)) : ''), result: result || null, finishedAt: new Date().toISOString() })
   }
   process.exit(0)
 })
 `
 
-function spawnCodexTask(kind, prompt, model) {
-  const codex = codexPath()
-  if (!codex) return { error: 'codex-not-installed' }
-
+// Generic spawner: builds the task record, writes the prompt to a temp inFile,
+// drops the runner + cfg, and launches the detached node wrapper.
+function spawnBgTask({ kind, prompt, model, cmd, args, outFile, label }) {
   const taskId = newTaskId()
   const tf = taskFile(taskId)
   const dir = tasksDir()
-  const outFile = path.join(dir, taskId + '.out')
   const inFile = path.join(dir, taskId + '.in')
   const runnerFile = path.join(dir, taskId + '.runner.js')
   const cfgFile = path.join(dir, taskId + '.cfg.json')
-  const usedModel = model || 'gpt-5.5'
 
   fs.writeFileSync(inFile, String(prompt))
 
@@ -165,7 +158,7 @@ function spawnCodexTask(kind, prompt, model) {
     kind,
     status: 'running',
     prompt: String(prompt),
-    model: usedModel,
+    model: model || null,
     result: null,
     error: null,
     startedAt: nowIso(),
@@ -175,7 +168,7 @@ function spawnCodexTask(kind, prompt, model) {
 
   fs.writeFileSync(runnerFile, RUNNER_SRC)
   fs.writeFileSync(cfgFile, JSON.stringify({
-    taskFile: tf, outFile, inFile, codex, model: usedModel, kind,
+    taskFile: tf, cmd, args, inFile, outFile: outFile || null, label: label || cmd,
   }))
 
   const child = spawn(process.execPath, [runnerFile, cfgFile], {
@@ -191,6 +184,57 @@ function spawnCodexTask(kind, prompt, model) {
   return { taskId, status: 'running' }
 }
 
+// Delegate to Codex: `codex exec ... -o <outfile> -` (prompt on stdin).
+function spawnCodexTask(kind, prompt, model) {
+  const codex = codexPath()
+  if (!codex) return { error: 'codex-not-installed' }
+
+  const dir = tasksDir()
+  const usedModel = model || 'gpt-5.5'
+  const outFile = path.join(dir, newTaskId() + '.out')
+
+  const args = [
+    'exec',
+    '--skip-git-repo-check',
+    '--sandbox', 'read-only',
+    '--ephemeral',
+    '--color', 'never',
+    '-m', usedModel,
+    '-o', outFile,
+    '-',                       // read prompt from stdin
+  ]
+
+  return spawnBgTask({
+    kind, prompt, model: usedModel, cmd: codex, args, outFile, label: 'codex',
+  })
+}
+
+// Delegate to Claude: `claude -p --output-format text --permission-mode plan`
+// (prompt on stdin). Read-only / advisory posture: no --dangerously-skip-permissions.
+function spawnClaudeTask(kind, prompt, model) {
+  const claude = claudePath()
+  if (!claude) return { error: 'claude-not-installed' }
+
+  const args = [
+    '-p',                       // print mode (headless, non-interactive)
+    '--output-format', 'text',
+    '--permission-mode', 'plan', // read-only / planning posture: cannot edit
+  ]
+  if (model) { args.push('--model', model) }
+
+  // Wrap with an explicit read-only advisory instruction so the delegation
+  // stays analysis/review only even if permission-mode plan is loosened.
+  const wrapped =
+    'You are an advisory sub-agent invoked in read-only mode. ' +
+    'Perform analysis/review only. Do NOT edit, create, or delete any files; ' +
+    'do NOT run state-changing commands. Respond with your answer directly.\n\n' +
+    String(prompt)
+
+  return spawnBgTask({
+    kind, prompt: wrapped, model: model || null, cmd: claude, args, outFile: null, label: 'claude',
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Tool definitions + dispatch
 // ---------------------------------------------------------------------------
@@ -203,6 +247,18 @@ const TOOLS = [
       properties: {
         prompt: { type: 'string', description: 'The full instruction/prompt for Codex.' },
         model: { type: 'string', description: 'Optional model id (default gpt-5.5).' },
+      },
+      required: ['prompt'],
+    },
+  },
+  {
+    name: 'delegate_to_claude',
+    description: 'Delegate a task to Claude asynchronously in the background (the mirror of delegate_to_codex; use this from the Codex CLI to hand work to Claude). Runs Claude headless in a read-only / advisory posture (analysis & review only — it will not edit files). Returns immediately with a taskId; poll get_task_result or wait_for_tasks to collect the result.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'The full instruction/prompt for Claude.' },
+        model: { type: 'string', description: 'Optional model id/alias (e.g. sonnet, opus). Defaults to the Claude CLI default.' },
       },
       required: ['prompt'],
     },
@@ -311,7 +367,10 @@ async function callTool(name, args) {
   args = args || {}
   switch (name) {
     case 'delegate_to_codex':
-      return spawnCodexTask('delegate', args.prompt, args.model)
+      return spawnCodexTask('codex', args.prompt, args.model)
+
+    case 'delegate_to_claude':
+      return spawnClaudeTask('claude', args.prompt, args.model)
 
     case 'cross_review': {
       const prompt =

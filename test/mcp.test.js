@@ -59,7 +59,7 @@ function makeClient(child) {
     child.stdin.write(Buffer.concat([header, body]))
     if (isNotification) return Promise.resolve(null)
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('timeout waiting for id ' + id + ' (' + method + ')')), 130000)
+      const timer = setTimeout(() => reject(new Error('timeout waiting for id ' + id + ' (' + method + ')')), 200000)
       waiters.set(id, (msg) => { clearTimeout(timer); resolve(msg) })
     })
   }
@@ -71,6 +71,10 @@ function delay(ms) { return new Promise((r) => setTimeout(r, ms)) }
 async function main() {
   const hasCodex = (() => {
     const r = spawnSync('which', ['codex'], { encoding: 'utf8' })
+    return r.status === 0 && r.stdout.trim()
+  })()
+  const hasClaude = (() => {
+    const r = spawnSync('which', ['claude'], { encoding: 'utf8' })
     return r.status === 0 && r.stdout.trim()
   })()
 
@@ -95,7 +99,7 @@ async function main() {
   const tools = (list.result && list.result.tools) || []
   ok(tools.length >= 9, 'has >= 9 tools (got ' + tools.length + ')')
   const names = tools.map((t) => t.name)
-  const expected = ['delegate_to_codex', 'get_task_result', 'wait_for_tasks', 'list_tasks', 'cross_review', 'claim_files', 'release_files', 'list_claims', 'record_task', 'read_run']
+  const expected = ['delegate_to_codex', 'delegate_to_claude', 'get_task_result', 'wait_for_tasks', 'list_tasks', 'cross_review', 'claim_files', 'release_files', 'list_claims', 'record_task', 'read_run']
   ok(expected.every((n) => names.includes(n)), 'all expected tool names present')
   ok(tools.every((t) => t.inputSchema && t.inputSchema.type === 'object' && typeof t.inputSchema.properties === 'object'), 'every tool has a valid object inputSchema')
 
@@ -135,6 +139,30 @@ async function main() {
         ok(final.status === 'done', 'task status === done')
         ok(final.result && /PONG/.test(final.result), 'result contains PONG')
       }
+    }
+  }
+
+  console.log('== 4b. delegate_to_claude (async, bidirectional) -> CLAUDEPONG ==')
+  if (!hasClaude) {
+    console.log('  SKIP: claude not installed in this environment')
+  } else {
+    const del = await client.send('tools/call', { name: 'delegate_to_claude', arguments: { prompt: 'Reply with exactly: CLAUDEPONG, nothing else.' } })
+    const dRec = JSON.parse(del.result.content[0].text)
+    if (dRec.error === 'claude-not-installed') {
+      console.log('  SKIP: server reports claude-not-installed')
+    } else {
+      ok(dRec.taskId && dRec.status === 'running', 'delegate_to_claude returned taskId with status running')
+
+      // Wait (up to 180s) for the task to finish, then read its final record.
+      const w = await client.send('tools/call', { name: 'wait_for_tasks', arguments: { taskIds: [dRec.taskId], timeoutMs: 180000 } })
+      JSON.parse(w.result.content[0].text) // ensure wait_for_tasks returns valid records
+      const g = await client.send('tools/call', { name: 'get_task_result', arguments: { taskId: dRec.taskId } })
+      const final = JSON.parse(g.result.content[0].text)
+      console.log('  claude task status: ' + final.status)
+      if (final.error) console.log('  claude task error: ' + String(final.error).slice(0, 300))
+      if (final.result) console.log('  claude task result (trimmed): ' + String(final.result).slice(0, 200))
+      ok(final.status === 'done', 'claude task status === done')
+      ok(final.result && /CLAUDEPONG/.test(final.result), 'claude result contains CLAUDEPONG')
     }
   }
 

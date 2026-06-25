@@ -137,6 +137,23 @@ tools are available in any session:
 So Claude can say *"delegate the implementation to Codex"* and keep going while
 Codex runs — exactly AgentMesh's flagship move, with no external server to install.
 
+### Bidirectional (drive from Claude **or** Codex)
+
+The same server registers with **both** CLIs, so either agent can be the driver and
+delegate to the other:
+
+```bash
+bash tools/install-mcp.sh   # registers the server with Codex + adds an AGENTS.md block
+```
+
+- In **Claude**: *"delegate the implementation to Codex"* → `delegate_to_codex`.
+- In **Codex**: *"get Claude to review this"* → `delegate_to_claude` (runs `claude -p`
+  read-only in the background, returns a `taskId`).
+
+`delegate_to_claude` is advisory/read-only by design (no `--dangerously-skip-permissions`).
+Claude-side registration is automatic via the plugin's `.mcp.json`; the script only
+wires the Codex side (`~/.codex/config.toml` + `~/.codex/AGENTS.md`).
+
 The file-claim CLI is also callable directly from Bash (the workflow script is
 sandboxed):
 
