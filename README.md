@@ -106,26 +106,42 @@ isn't on the PATH, the workflow degrades to Claude-only automatically.
 ## Orchestration (vs AgentMesh)
 
 [AgentMesh](https://github.com/KuciaGuillaume/AgentMesh) is an MCP server that
-coordinates Claude Code + Codex. hyperpower stays a **plugin** (no separate server —
-the Workflow runtime already runs agents concurrently) and now matches its core
-orchestration primitives:
+coordinates Claude Code + Codex. hyperpower now does **both**: a debated workflow
+**and** its own MCP server, matching AgentMesh's primitives — including **async
+background delegation**:
 
 | Primitive | hyperpower | how |
 | --- | :---: | --- |
-| Claude+Codex debate / cross-review | ✅ | the cycle (Plan→Todo→Dev→Verify→Ship), Codex debates at every gate |
-| **Parallel delegation** | ✅ | in **Build**, Claude implements *while* Codex preps tests/risks **concurrently** via the runtime's `parallel()` — not sequential |
-| **File claims (anti-clobber)** | ✅ | `bin/hpw-claims.js` — an atomic lock registry; agents `claim` files before editing, conflicts return exit 3 (race-tested: 12 concurrent claimers → exactly 1 winner) |
-| **Persistent run/task state** | ✅ | structured records under `~/.hyperpower/<run>/run.json` (who/what/when/result), alongside the harness `journal.jsonl` |
+| Claude+Codex debate / cross-review | ✅ | the cycle (Plan→Todo→Dev→Verify→Ship), Codex debates at every gate; `cross_review` MCP tool |
+| **Async background delegation** | ✅ | the MCP server's `delegate_to_codex` spawns `codex exec` **detached**, returns a `taskId` immediately, Claude keeps working, then `get_task_result`/`wait_for_tasks` collect it — true fire-and-forget |
+| **Parallel delegation** | ✅ | in **Dev**, Claude implements *while* Codex preps tests/risks **concurrently** via the runtime's `parallel()` |
+| **File claims (anti-clobber)** | ✅ | `bin/hpw-claims.js` atomic lock registry, exposed as MCP tools; conflicts return exit 3 (race-tested: 12 concurrent claimers → exactly 1 winner) |
+| **Persistent run/task state** | ✅ | structured records under `~/.hyperpower/<run>/` (tasks + run log) |
+| **Auto-registered MCP server** | ✅ | `.mcp.json` ships with the plugin — tools load on install, usable from any Claude session (not only the workflow) |
 | Live per-agent progress bar in the native table | ✅ **unique** | the binary patch above — AgentMesh has nothing like it |
 
-The file-claim CLI (agents call it from Bash, since the workflow script itself is
+### MCP server (async coordination)
+
+`mcp/hyperpower-mcp.js` is a **dependency-free** Node stdio MCP server (hand-rolled
+JSON-RPC 2.0), auto-registered via `.mcp.json`. Once the plugin is installed its
+tools are available in any session:
+
+| Tool | What |
+| --- | --- |
+| `delegate_to_codex({prompt, model?})` | start Codex in the background → `{taskId, status:"running"}` |
+| `get_task_result({taskId})` / `wait_for_tasks({taskIds})` | collect async results |
+| `cross_review({work, against})` | Codex reviews work (async) |
+| `claim_files` / `release_files` / `list_claims` | atomic file locks |
+| `record_task` / `read_run` | persistent run state |
+
+So Claude can say *"delegate the implementation to Codex"* and keep going while
+Codex runs — exactly AgentMesh's flagship move, with no external server to install.
+
+The file-claim CLI is also callable directly from Bash (the workflow script is
 sandboxed):
 
 ```bash
-node bin/hpw-claims.js claim   <run> <owner> <file...>   # exit 3 on conflict
-node bin/hpw-claims.js release <run> <owner> [file...]
-node bin/hpw-claims.js list    <run>
-node bin/hpw-claims.js record  <run> <agent> <role> "<result>"
+node bin/hpw-claims.js claim <run> <owner> <file...>   # exit 3 on conflict
 ```
 
 State lives under `~/.hyperpower/` (override with `HYPERPOWER_HOME`). Pure Node, no
