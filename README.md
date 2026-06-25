@@ -97,7 +97,7 @@ Restart Claude Code, run `/hyperpower <task> --codex`, open `/workflows` → bar
 | Piece | Role |
 | --- | --- |
 | `commands/hyperpower.md` | entry point — manages the allow-codex flag, proposes Codex on big tasks, launches the workflow |
-| `workflows/hyperpower-debate.workflow.js` | the live table: **Plan → Debate → Implement → Review** |
+| `workflows/hyperpower-debate.workflow.js` | skill-driven cycle: **Plan → Todo → Dev → Verify → Ship** (debate at every gate) |
 | `agents/codex.md` | the `(codex)` persona — a thin proxy that drives `codex exec` |
 
 The `(codex)` nodes shell out to the **Codex CLI** (`codex exec`). If `codex`
@@ -112,7 +112,7 @@ orchestration primitives:
 
 | Primitive | hyperpower | how |
 | --- | :---: | --- |
-| Claude+Codex debate / cross-review | ✅ | the debate workflow (Plan → Debate → Build → Review) |
+| Claude+Codex debate / cross-review | ✅ | the cycle (Plan→Todo→Dev→Verify→Ship), Codex debates at every gate |
 | **Parallel delegation** | ✅ | in **Build**, Claude implements *while* Codex preps tests/risks **concurrently** via the runtime's `parallel()` — not sequential |
 | **File claims (anti-clobber)** | ✅ | `bin/hpw-claims.js` — an atomic lock registry; agents `claim` files before editing, conflicts return exit 3 (race-tested: 12 concurrent claimers → exactly 1 winner) |
 | **Persistent run/task state** | ✅ | structured records under `~/.hyperpower/<run>/run.json` (who/what/when/result), alongside the harness `journal.jsonl` |

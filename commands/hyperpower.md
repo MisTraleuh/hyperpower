@@ -38,8 +38,10 @@ Call the **Workflow** tool with:
 > (`"{\"task\":...}"`), the script sees `args.task` as undefined and runs with
 > "No task provided". This is the #1 failure mode — get it right.
 
-This renders the live table in `/workflows` — phases **Plan → Debate → Build →
-Review** with `(claude)` and `(codex·<model>)` nodes that debate. Tell the user to
+This renders the live table in `/workflows` — a skill-driven cycle **Plan → Todo →
+Dev → Verify → Ship** with `(claude)` and `(codex·<model>)` nodes that **debate at
+every gate** (plan, todo, audit, final review), apply the user's skills (todo, dev,
+verify-dev, build, test), and **loop back to Dev if Verify is KO**. Tell the user to
 watch it live with `/workflows`.
 
 **Do NOT run your own parallel investigation in the main thread.** The workflow is

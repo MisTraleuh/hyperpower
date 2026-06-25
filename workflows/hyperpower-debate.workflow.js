@@ -2,10 +2,11 @@ export const meta = {
   name: 'hyperpower-debate',
   description: 'Claude and Codex debate a plan, then build and cross-review — one live table.',
   phases: [
-    { title: 'Plan',      detail: 'Claude drafts an initial plan' },
-    { title: 'Debate',    detail: 'Codex critiques, Claude revises, until they agree' },
-    { title: 'Build',     detail: 'Claude implements WHILE Codex preps in parallel (file-claim safe)' },
-    { title: 'Review',    detail: 'Codex reviews the result, Claude reconciles' },
+    { title: 'Plan',    detail: 'Claude drafts a rigorous plan; Codex debates it' },
+    { title: 'Todo',    detail: 'Spec actionable tickets (todo skill); Codex debates them' },
+    { title: 'Dev',     detail: 'Implement tickets (dev skill) WHILE Codex preps in parallel' },
+    { title: 'Verify',  detail: 'Audit the implementation (verify-dev skill); Codex debates; loop if KO' },
+    { title: 'Ship',    detail: 'Build + test (build/test skills); Codex final review; reconcile' },
   ],
 }
 
@@ -168,50 +169,40 @@ const CRITIQUE_SCHEMA = {
   },
 }
 
-log('Task: ' + task.slice(0, 120) + (task.length > 120 ? '…' : ''))
-if (task === 'No task provided') log('WARNING: empty task — check that args was passed as a JSON object, not a string.')
+// --- skill-driven phases ----------------------------------------------------
+// The big change: each phase APPLIES one of the user's skills (~/.claude/skills/
+// <name>/SKILL.md). The workflow script is sandboxed, but the agents it spawns have
+// the Read tool — so we tell each agent to read its skill file and follow that
+// methodology. Robust whether or not subagents can invoke the Skill tool directly.
+function skillNote(skill) {
+  return '\n\nMETHODOLOGY — apply the "' + skill + '" skill: Read the file ' +
+    '~/.claude/skills/' + skill + '/SKILL.md and follow its procedure rigorously. ' +
+    'If that path is missing, fall back to senior-engineer best practice for ' + skill + '.'
+}
 
-// Now that allowCodex is known, budget the overall bar. With Codex: a typical
-// debate is ~1 critique + 1 revise, plus the review node. renderBar() clamps at
-// 100%, so a slight under-budget just means the bar fills sooner — acceptable.
-if (allowCodex) agentsTotal += 2 /* critique + revise */ + 1 /* review */
-log(renderBar(0, agentsTotal) + '  0/' + agentsTotal + ' agents · starting')
-
-// --- Plan ------------------------------------------------------------------
-phase('Plan')
-let plan = (await claude(
-  'Draft a rigorous, numbered plan to solve this task — good enough to survive an ' +
-  'adversarial review by a second engine. For each step be specific (what, where, why); ' +
-  'call out the key risks, edge cases, and assumptions, and how you would verify success. ' +
-  'No code yet, but no hand-waving either.\n\n' + task +
-  FINAL_TEXT_NOTE,
-  'draft-plan', 'Plan', PLAN_SCHEMA
-)).plan
-
-// --- Debate (only when Codex is allowed) ----------------------------------
 let codexAvailable = allowCodex
 const debateLog = []
-if (allowCodex) {
-  const MAX_ROUNDS = 3
-  // Force a REAL debate: Codex may not rubber-stamp on round 1, and we require at
-  // least one full critique→revise cycle before any agreement is accepted. This is
-  // the fix for "the debate gets skipped / it doesn't think enough": before, Codex
-  // could `agree` on the first pass and the loop broke with zero revisions.
-  const MIN_REVISIONS = 1
-  let revisions = 0
+
+// Generalized FORCED debate gate, reusable at every milestone. Codex must raise
+// concrete objections (no rubber-stamp), and the artifact goes through >=1 real
+// critique->revise cycle before agreement. `reviseFn(objections, reasoning, current)`
+// returns the revised artifact (a string). Returns the possibly-revised artifact.
+async function debateGate(gate, phaseName, artifactKind, artifact, reviseFn) {
+  if (!codexAvailable) return artifact
+  const MAX_ROUNDS = 3, MIN_REVISIONS = 1
+  let revisions = 0, current = artifact
   for (let round = 1; round <= MAX_ROUNDS; round++) {
-    phase('Debate')
-    log('Debate r' + round + ': Codex is challenging the plan (read-only)…')
-    const firstPass = round === 1
+    phase(phaseName)
+    log(gate + ' debate r' + round + ': Codex challenges the ' + artifactKind + '…')
+    const first = round === 1
     const critique = await codex(
-      (firstPass
-        ? 'Adversarially critique this plan. You MUST surface at least TWO concrete, ' +
-          'specific weaknesses, risks, or gaps — do NOT rubber-stamp and do NOT agree on ' +
-          'this first pass. Set agree=false and list the objections.'
-        : 'Critique the REVISED plan. If it is genuinely solid now, you may set agree=true; ' +
-          'otherwise return remaining concrete objections.') +
-      '\n\nTASK:\n' + task + '\n\nPLAN:\n' + plan + FINAL_TEXT_NOTE,
-      'critique r' + round, 'Debate', CRITIQUE_SCHEMA
+      (first
+        ? 'Adversarially critique this ' + artifactKind + '. Surface at least TWO concrete, ' +
+          'specific weaknesses/risks/gaps — do NOT rubber-stamp, set agree=false.'
+        : 'Critique the REVISED ' + artifactKind + '. If genuinely solid now you may set ' +
+          'agree=true; else return remaining concrete objections.') +
+      '\n\nTASK:\n' + task + '\n\n' + artifactKind.toUpperCase() + ':\n' + current + FINAL_TEXT_NOTE,
+      gate + '-critique r' + round, phaseName, CRITIQUE_SCHEMA
     )
     if (!critique || critique.error) {
       log('Codex unavailable (' + ((critique && critique.error) || 'no result') + ') — continuing Claude-only.')
@@ -220,93 +211,143 @@ if (allowCodex) {
     }
     let objections = critique.objections || []
     const reasoning = (critique.reasoning || '').trim()
-    // Surface Codex's actual trace in the live log so the debate is visible, not silent.
-    log('Codex r' + round + ' · ' + objections.length + ' objection(s)' +
-      (reasoning ? ' — ' + reasoning.replace(/\s+/g, ' ').slice(0, 140) : ''))
-    // Only accept agreement once at least one revision has actually happened.
+    log('Codex [' + gate + ' r' + round + '] · ' + objections.length + ' objection(s)' +
+      (reasoning ? ' — ' + reasoning.replace(/\s+/g, ' ').slice(0, 130) : ''))
     if ((critique.agree || objections.length === 0) && revisions >= MIN_REVISIONS) {
-      log('Codex agrees after round ' + round + ' (post-revision).')
-      debateLog.push({ round, agreed: true, reasoning })
+      log('Codex agrees on the ' + artifactKind + ' after round ' + round + '.')
+      debateLog.push({ gate, round, agreed: true, reasoning })
       break
     }
-    // No objections but we still owe a revision: make Claude self-harden the plan
-    // rather than waving it through, so there is always genuine back-and-forth.
     if (objections.length === 0) {
-      log('Codex raised no objections on r' + round + ' — forcing a hardening pass anyway.')
-      objections = ['No explicit objection from Codex — proactively harden the plan: ' +
-        'tighten the weakest step, add an edge case you may have missed, and state one risk.']
+      objections = ['No explicit objection — proactively harden the ' + artifactKind +
+        ': tighten the weakest part, add a missed edge case, state one risk.']
     }
-    debateLog.push({ round, objections, reasoning })
-    // Feed Codex's FULL reasoning (not just bullet objections) into the revision, so the
-    // revised plan genuinely integrates Codex's thinking instead of pattern-matching bullets.
-    plan = (await claude(
-      'Codex (a second, independent engine) critiqued your plan. Engage with it seriously.\n\n' +
-      (reasoning ? "CODEX'S FULL REASONING:\n" + reasoning + '\n\n' : '') +
-      'CONCRETE OBJECTIONS:\n- ' + objections.join('\n- ') + '\n\n' +
-      'Address EACH objection (accept or reject, with a one-line reason), incorporate what is ' +
-      'right, push back on what is wrong, and return a genuinely STRONGER revised plan — not a ' +
-      'cosmetic edit.\n\nCURRENT PLAN:\n' + plan + FINAL_TEXT_NOTE,
-      'revise r' + round, 'Debate', PLAN_SCHEMA
-    )).plan
+    debateLog.push({ gate, round, objections, reasoning })
+    current = await reviseFn(objections, reasoning, current, round)
     revisions++
   }
+  return current
 }
 
-// --- Build (PARALLEL: Claude implements WHILE Codex prepares, no clobber) ---
-// Unlike a strictly sequential pipeline, here Claude's implementation and Codex's
-// independent prep run CONCURRENTLY (the runtime's parallel()). Claude WRITES files
-// (claiming each first); Codex stays READ-ONLY and prepares a test/risk checklist
-// from the plan, so its work is genuinely independent — no false parallelism, and
-// the file-claim registry guarantees no clobber if a future variant lets both write.
-phase('Build')
-let buildPrep = null
-const buildTasks = [
+log('Task: ' + task.slice(0, 120) + (task.length > 120 ? '…' : ''))
+if (task === 'No task provided') log('WARNING: empty task — check that args was passed as a JSON object, not a string.')
+// Budget the overall bar: 5 phases, each up to ~2 nodes when Codex debates.
+agentsTotal = 6 + (allowCodex ? 6 : 0)
+log(renderBar(0, agentsTotal) + '  0/' + agentsTotal + ' agents · starting')
+
+// === 1. PLAN → debate =======================================================
+phase('Plan')
+let plan = (await claude(
+  'Draft a rigorous, numbered plan to solve this task — good enough to survive an ' +
+  'adversarial review by a second engine. Be specific (what/where/why), call out risks, ' +
+  'edge cases, assumptions, and how to verify success. No code yet.\n\n' + task + FINAL_TEXT_NOTE,
+  'draft-plan', 'Plan', PLAN_SCHEMA
+)).plan
+plan = await debateGate('plan', 'Plan', 'plan', plan, (obj, reasoning, cur) =>
+  claude('Codex critiqued your plan. Engage seriously.\n\n' +
+    (reasoning ? "CODEX REASONING:\n" + reasoning + '\n\n' : '') +
+    'OBJECTIONS:\n- ' + obj.join('\n- ') + '\n\nAddress each (accept/reject + reason), and ' +
+    'return a STRONGER revised plan.\n\nCURRENT PLAN:\n' + cur + FINAL_TEXT_NOTE,
+    'plan-revise', 'Plan', PLAN_SCHEMA).then((r) => r.plan))
+
+// === 2. TODO (todo skill) → debate =========================================
+phase('Todo')
+let todo = (await claude(
+  'Turn the agreed plan into actionable technical tickets (a todo list): precise specs, ' +
+  'the exact files each ticket touches, dependencies, and execution order.' +
+  skillNote('todo') + '\n\nPLAN:\n' + plan + FINAL_TEXT_NOTE,
+  'spec-todo', 'Todo', PLAN_SCHEMA
+)).plan
+todo = await debateGate('todo', 'Todo', 'todo', todo, (obj, reasoning, cur) =>
+  claude('Codex critiqued your tickets. Engage seriously.\n\n' +
+    (reasoning ? "CODEX REASONING:\n" + reasoning + '\n\n' : '') +
+    'OBJECTIONS:\n- ' + obj.join('\n- ') + '\n\nFix the ticket specs/order/deps and return the ' +
+    'revised todo list.\n\nCURRENT TODO:\n' + cur + FINAL_TEXT_NOTE,
+    'todo-revise', 'Todo', PLAN_SCHEMA).then((r) => r.plan))
+
+// === 3. DEV (dev skill) — Claude implements WHILE Codex preps in parallel ===
+phase('Dev')
+let devPrep = null
+const devTasks = [
   () => claude(
-    'Carry out the agreed plan. If it requires code, make the edits and run tests; report ' +
-    'findings with exact file:line evidence. Return a summary of what you found / changed.\n\n' +
-    'PLAN:\n' + plan + claimNote('claude', 'build'),
-    'build', 'Build'
-  ),
+    'Implement the tickets with senior-architect rigor (backend + frontend + close each ticket). ' +
+    'Make the edits and run what you can; report changes with exact file:line evidence.' +
+    skillNote('dev') + claimNote('claude', 'dev') + '\n\nTODO:\n' + todo,
+    'dev', 'Dev'),
 ]
 if (codexAvailable) {
-  buildTasks.push(() => codex(
-    'READ-ONLY prep IN PARALLEL with Claude\'s implementation. Do NOT edit files. From the ' +
-    'plan, produce a concise checklist of: tests that should exist, edge cases to verify, and ' +
-    'the top risks to watch during implementation. This runs while Claude builds.\n\nPLAN:\n' + plan,
-    'build-prep', 'Build'
-  ))
+  devTasks.push(() => codex(
+    'READ-ONLY, IN PARALLEL with Claude\'s implementation. Do NOT edit files. From the todo, ' +
+    'produce a verification checklist: tests that must exist, edge cases, and the top risks to ' +
+    'watch. This runs while Claude develops.\n\nTODO:\n' + todo,
+    'dev-prep', 'Dev'))
 }
-const buildResults = await parallel(buildTasks)
-const build = buildResults[0]
-if (buildResults.length > 1 && buildResults[1]) {
-  buildPrep = buildResults[1]
-  if (typeof buildPrep === 'string' && buildPrep.trim()) {
-    log('Codex build-prep · ' + buildPrep.replace(/\s+/g, ' ').slice(0, 140))
-  }
+const devResults = await parallel(devTasks)
+let dev = devResults[0]
+if (devResults.length > 1 && devResults[1]) {
+  devPrep = devResults[1]
+  if (typeof devPrep === 'string' && devPrep.trim()) log('Codex dev-prep · ' + devPrep.replace(/\s+/g, ' ').slice(0, 130))
 }
 
-// --- Review (Codex reviews the result; Claude reconciles) ------------------
-phase('Review')
+// === 4. VERIFY (verify-dev skill) → debate → loop if KO =====================
+let verify = null
+const MAX_FIX_ROUNDS = 2
+for (let fix = 0; fix <= MAX_FIX_ROUNDS; fix++) {
+  phase('Verify')
+  verify = await claude(
+    'Audit the real implementation with senior code-review rigor: backend/frontend/DB ' +
+    'consistency, edge cases, dead code, and whether each ticket is truly done. State a clear ' +
+    'verdict: OK or KO, and list blocking issues with file:line.' +
+    skillNote('verify-dev') + '\n\nTODO:\n' + todo +
+    (devPrep ? '\n\nCODEX CHECKLIST:\n' + JSON.stringify(devPrep) : '') +
+    '\n\nWORK:\n' + JSON.stringify(dev) + FINAL_TEXT_NOTE,
+    fix === 0 ? 'verify-dev' : 'verify-dev r' + (fix + 1), 'Verify', PLAN_SCHEMA
+  )
+  // Debate the audit: real bugs vs false positives.
+  verify = { plan: await debateGate('verify', 'Verify', 'audit', verify.plan, (obj, reasoning, cur) =>
+    claude('Codex debated your audit (which findings are real bugs vs false positives?).\n\n' +
+      (reasoning ? "CODEX REASONING:\n" + reasoning + '\n\n' : '') +
+      'POINTS:\n- ' + obj.join('\n- ') + '\n\nReturn the reconciled audit with a clear OK/KO ' +
+      'verdict and the real blocking issues only.\n\nCURRENT AUDIT:\n' + cur + FINAL_TEXT_NOTE,
+      'verify-revise', 'Verify', PLAN_SCHEMA).then((r) => r.plan)) }
+  const isKO = /\bKO\b/i.test(verify.plan) && !/\bverdict[:\s]+OK\b/i.test(verify.plan)
+  if (!isKO || fix === MAX_FIX_ROUNDS) {
+    log(isKO ? 'Verify still KO after ' + (fix + 1) + ' round(s) — shipping with caveats.' : 'Verify OK.')
+    break
+  }
+  log('Verify KO (round ' + (fix + 1) + ') — looping back to Dev to fix blocking issues.')
+  phase('Dev')
+  dev = await claude(
+    'Your implementation was audited and found KO. Fix EVERY blocking issue listed, then report ' +
+    'what you changed with file:line.' + skillNote('dev') + claimNote('claude', 'dev-fix') +
+    '\n\nAUDIT (blocking issues):\n' + verify.plan + '\n\nTODO:\n' + todo,
+    'dev-fix r' + (fix + 1), 'Dev')
+}
+
+// === 5. SHIP (build + test skills) → Codex final review → reconcile =========
+phase('Ship')
+const ship = await claude(
+  'Bring the project to a deliverable state: clean build, types, linter, then actively run a ' +
+  'test plan (nominal + edge + error cases) with raw proof and a clear verdict.' +
+  skillNote('build') + skillNote('test') + '\n\nWORK SO FAR:\n' + JSON.stringify(dev) +
+  '\n\nAUDIT:\n' + JSON.stringify(verify),
+  'build+test', 'Ship')
+
 let codexReview = null
 if (codexAvailable) {
-  log('Review: Codex is auditing the result (read-only)…')
+  log('Ship: Codex final review (read-only)…')
   codexReview = await codex(
-    'Review this work against the plan THOROUGHLY. Flag correctness bugs, missed edge ' +
-    'cases, or unsupported claims, with file:line where possible. Give your full reasoning ' +
-    '— this review is shown to the user as Codex\'s trace.\n\nPLAN:\n' + plan +
-    (buildPrep ? '\n\nYOUR EARLIER BUILD-PREP CHECKLIST (verify it was honored):\n' + JSON.stringify(buildPrep) : '') +
-    '\n\nWORK:\n' + JSON.stringify(build),
-    'review', 'Review'
-  )
-  if (typeof codexReview === 'string' && codexReview.trim()) {
-    log('Codex review · ' + codexReview.replace(/\s+/g, ' ').slice(0, 160))
-  }
+    'Final review of the SHIPPED state against the plan & todo. Flag correctness bugs, missed ' +
+    'edge cases, or unsupported "it works" claims, with file:line. Give your full reasoning.' +
+    '\n\nPLAN:\n' + plan + '\n\nTODO:\n' + todo + '\n\nBUILD+TEST:\n' + JSON.stringify(ship),
+    'final-review', 'Ship')
+  if (typeof codexReview === 'string' && codexReview.trim()) log('Codex final review · ' + codexReview.replace(/\s+/g, ' ').slice(0, 160))
 }
 const verdict = await claude(
-  'Reconcile your work with Codex\'s review. State the final answer, list which Codex ' +
+  'Reconcile everything with Codex\'s final review. State the final answer, list which Codex ' +
   'points you accept vs reject (with reasons), and flag anything still unverified.\n\n' +
-  'WORK:\n' + JSON.stringify(build) + '\n\nCODEX REVIEW:\n' + JSON.stringify(codexReview),
-  'reconcile', 'Review'
-)
+  'BUILD+TEST:\n' + JSON.stringify(ship) + '\n\nCODEX REVIEW:\n' + JSON.stringify(codexReview),
+  'reconcile', 'Ship')
 
-return { task, allowCodex, codexAvailable, runId: RUN_ID, plan, debate: debateLog, buildPrep, build, codexReview, verdict }
+return { task, allowCodex, codexAvailable, runId: RUN_ID, plan, todo, debate: debateLog,
+  devPrep, dev, verify, ship, codexReview, verdict }
