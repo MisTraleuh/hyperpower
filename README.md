@@ -296,5 +296,5 @@ Local clone alternative:
 - `--rounds N` to cap/extend the debate.
 - An arbiter node when Claude and Codex can't converge.
 
-<!-- hyperpower: build marker #005 (cosmetic; safe to remove) -->
+<!-- hyperpower: build marker #006 (cosmetic; safe to remove) -->
 
