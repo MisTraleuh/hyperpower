@@ -263,6 +263,26 @@ OUT_RE = re.compile(
     rb'let (\w{1,3})=(\w{1,3})!=="loading"&&(\w{1,3})\?\.finalText\?(\w{1,3})\.finalText:(\w{1,3})\.resultPreview\?\?""'
 )
 
+# Shared crash-marker regex BODY (no delimiters). Deterministic strings relayed
+# verbatim from the codex CLI; a bare isolated "error" is deliberately NOT a marker
+# (avoids false positives on prose). Em-dash is the \uXXXX escape (ASCII in-file).
+# Used by BOTH the bar edit (build_bar_replacement) and the leading-glyph edit so
+# the two stay in lock-step.
+CRASH_RE_JS = (
+    "usage limit|rate limit|codex exec returned ERROR|"
+    "codex-not-installed|ERROR \\u2014 Codex"
+)
+
+# GLYPH: the leading node status icon (tick/cross) in the /workflows rows is
+# `bar(gFe(<agent>,<arg>))` where `function bar(status){case"done":{glyph:tt.tick,
+# color:"success"}...}` maps ONLY the status string (it never sees the agent). A
+# crashed (codex) node still has state "done", so it shows a green tick. We rewrite
+# each row call site to feed `bar` a crash-aware status ("failed" when the agent's
+# resultPreview carries a crash marker) WITHOUT touching gFe or the Outcome panel
+# (which receives the raw status as a prop and would otherwise lose its JSON viewer).
+# Captures: 1=AGENT var, 2=ARG var. Matches every row call site (loop/JKm/XKm).
+GLYPH_RE = re.compile(rb'bar\(gFe\((\w{1,3}),(\w{1,3})\)\)')
+
 
 def _find_one(regex, data, what):
     matches = list(regex.finditer(data))
@@ -353,6 +373,36 @@ def find_outcome_edit(data):
     return m.start(), old, new
 
 
+def find_glyph_edit(data):
+    """Find the FIRST remaining `bar(gFe(<agent>,<arg>))` row call site and return
+    (offset, old_bytes, new_bytes) making the leading status glyph crash-aware, or
+    None when no unpatched site remains.
+
+    The replacement wraps the status in an IIFE that downgrades "done" -> "failed"
+    when the agent's resultPreview holds a crash marker, so `bar` (the status->icon
+    mapper) emits the cross+error instead of the green tick. gFe is evaluated once.
+    Because the replacement does NOT contain the substring `bar(gFe(`, re-scanning
+    finds only the still-unpatched sites — so run() can loop until none remain."""
+    m = GLYPH_RE.search(data)
+    if not m:
+        return None
+    A = m.group(1).decode("latin-1")   # agent var (w / e / ...)
+    G = m.group(2).decode("latin-1")   # gFe 2nd arg
+    old = m.group(0)
+    # inner = the crash-aware arrow fn `(__a,__s)=>(<status>)`. It is then
+    # IIFE-invoked with the real agent + gFe status: bar( ( inner )( A, gFe(A,G) ) ).
+    inner = (
+        '(__a,__s)=>('
+        '__s==="done"&&(()=>{let __rp=(__a&&(__a.resultPreview||__a.finalText))||"";'
+        'return typeof __rp==="string"&&/' + CRASH_RE_JS + '/i.test(__rp)})()'
+        '?"failed":__s)'
+    )
+    new = (
+        "bar((" + inner + ")(" + A + ",gFe(" + A + "," + G + ")))"
+    ).encode("latin-1")
+    return m.start(), old, new
+
+
 def find_status_fn(data):
     """Return the captured status-helper name (e.g. 'ILe') or None if not found.
     Optional: the bar degrades to reading the agent's `.state` directly when None.
@@ -418,7 +468,7 @@ def build_bar_replacement(names, status_fn):
         # marker (avoids false positives on prose that merely mentions errors).
         'if(__st==="done"){let __rp=(e&&(e.resultPreview||e.finalText))||"";'
         'if(typeof __rp==="string"&&'
-        '/usage limit|rate limit|codex exec returned ERROR|codex-not-installed|ERROR \\u2014 Codex/i'
+        '/' + CRASH_RE_JS + '/i'
         '.test(__rp))__st="failed";}'
         'if(__st==="done")__bar="' + BAR_DONE + '";'
         'else if(__st==="failed")__bar="' + BAR_FAIL + '";'
@@ -634,6 +684,13 @@ def syntax_check_js(snippet_bytes, kind):
         wrapper = (
             "function __wrap(n,e){\n" + snip + ";\nreturn 0}\n"
         )
+    elif kind == "glyph":
+        # glyph is an expression `bar((...)(agent,gFe(...)))`; node --check only
+        # validates syntax, so undefined identifiers (bar/gFe/agent) are fine.
+        wrapper = (
+            "function bar(x){return x}function gFe(a,b){return 'done'}\n"
+            "function __wrap(){return " + snip + "}\n"
+        )
     else:
         raise ReapplyError("unknown snippet kind %r" % kind)
 
@@ -766,30 +823,57 @@ def run(binary=None, out=None):
 
         total_delta = info1["delta"] + info2["delta"]
 
-        # [3/4] ACTIVITY cap (re-derive + re-find after the prior shifts).
+        # [3/5] ACTIVITY cap (re-derive + re-find after the prior shifts).
         C3 = derive_constants(tmp_out)
         with open(tmp_out, "rb") as f:
             data3 = f.read()
         try:
             act_off, act_old, act_new = find_activity_edit(data3)
-            print("  [3/4] ACTIVITY cap %s -> %s" % (act_old.decode("latin-1"), act_new.decode("latin-1")))
+            print("  [3/5] ACTIVITY cap %s -> %s" % (act_old.decode("latin-1"), act_new.decode("latin-1")))
             info3 = patch(tmp_out, tmp_out, act_off, act_old, act_new, C3, sign=False)
             total_delta += info3["delta"]
         except ReapplyError as e:
-            print("  [3/4] ACTIVITY skipped (not found): %s" % e)
+            print("  [3/5] ACTIVITY skipped (not found): %s" % e)
 
-        # [4/4] OUTCOME json pretty-print (re-derive + re-find).
+        # [4/5] OUTCOME json viewer (re-derive + re-find).
         C4 = derive_constants(tmp_out)
         with open(tmp_out, "rb") as f:
             data4 = f.read()
         try:
             out_off, out_old, out_new = find_outcome_edit(data4)
             syntax_check_js(out_new, "outcome")
-            print("  [4/4] OUTCOME json viewer (glyph booleans) (%+d)" % (len(out_new) - len(out_old)))
+            print("  [4/5] OUTCOME json viewer (glyph booleans) (%+d)" % (len(out_new) - len(out_old)))
             info4 = patch(tmp_out, tmp_out, out_off, out_old, out_new, C4, sign=False)
             total_delta += info4["delta"]
         except ReapplyError as e:
-            print("  [4/4] OUTCOME skipped (not found): %s" % e)
+            print("  [4/5] OUTCOME skipped (not found): %s" % e)
+
+        # [5/5] GLYPH: crash-aware leading status icon at EVERY row call site
+        # (`bar(gFe(...))`). Loop: patch first match, re-derive, re-scan — the
+        # replacement never re-contains `bar(gFe(`, so this converges. Best-effort
+        # (skips cleanly if the row renderer changes shape on a future build).
+        glyph_count = 0
+        while True:
+            C5 = derive_constants(tmp_out)
+            with open(tmp_out, "rb") as f:
+                data5 = f.read()
+            try:
+                edit = find_glyph_edit(data5)
+            except ReapplyError as e:
+                print("  [5/5] GLYPH scan error: %s" % e)
+                break
+            if edit is None:
+                break
+            g_off, g_old, g_new = edit
+            try:
+                syntax_check_js(g_new, "glyph")
+                info5 = patch(tmp_out, tmp_out, g_off, g_old, g_new, C5, sign=False)
+                total_delta += info5["delta"]
+                glyph_count += 1
+            except ReapplyError as e:
+                print("  [5/5] GLYPH site skipped (%s)" % e)
+                break
+        print("  [5/5] GLYPH crash-aware status icon: %d site(s) rewritten" % glyph_count)
 
         print("  total delta: %+d bytes" % total_delta)
 
@@ -826,9 +910,10 @@ def run(binary=None, out=None):
         act_present   = b'_Lo=99,' in final_bytes or b'=99,' in final_bytes
         out_present   = b'__ln(JSON.parse(__t),0)' in final_bytes
         crash_present = b'codex exec returned ERROR' in final_bytes
+        glyph_present = b'__a.resultPreview||__a.finalText' in final_bytes
         print("  bar:", bar_present, "| badge:", badge_present,
               "| activity:", act_present, "| outcome:", out_present,
-              "| crash-detect:", crash_present)
+              "| crash-detect:", crash_present, "| glyph:", glyph_present)
 
         ok = (prc == 0 and pver == ver and sig.returncode == 0
               and bar_present and badge_present)
