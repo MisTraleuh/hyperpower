@@ -32,13 +32,43 @@ log(){ printf '%s\n' "$*"; }
 setup_agent(){
   local PL="$HOME/Library/LaunchAgents/com.hyperpower.claudebar.plist"
   mkdir -p "$HOME/Library/LaunchAgents"
+
+  # Stage a COPY of the tool OUT of any TCC-protected path. macOS TCC forbids a
+  # LaunchAgent from executing scripts located under ~/Desktop, ~/Documents or
+  # ~/Downloads ("Operation not permitted" — the exact failure we hit when $DIR was
+  # under ~/Desktop). ~/.local/share is not protected. Refresh the copy on every run
+  # so the agent always tracks the repo's current tool.
+  local STAGE="$HOME/.local/share/hyperpower/claude-bar"
+  mkdir -p "$STAGE"
+  if [ "$(cd "$DIR" && pwd)" != "$(cd "$STAGE" && pwd)" ]; then
+    if ! cp "$DIR/install.sh" "$DIR/bun_reapply.py" "$STAGE/"; then
+      log "⚠️  could not stage tool into $STAGE — LaunchAgent NOT installed"; return 1
+    fi
+  fi
+  chmod +x "$STAGE/install.sh"
+
+  # Build a PATH that resolves node / python3 / codesign inside the LaunchAgent's
+  # minimal environment (its default PATH is only /usr/bin:/bin:/usr/sbin:/sbin, so
+  # a Homebrew/nvm `node` is invisible and bun_reapply.py's `node --check` would
+  # safe-degrade). Derive the real tool dirs at install time.
+  local EXTRA="" tool d
+  for tool in node python3 codesign; do
+    d="$(command -v "$tool" 2>/dev/null)" && d="$(dirname "$d")" || d=""
+    [ -n "$d" ] || continue
+    # dedup against the standard tail AND anything already collected
+    case ":/usr/bin:/bin:/usr/sbin:/sbin:$EXTRA:" in *":$d:"*) : ;; *) EXTRA="${EXTRA:+$EXTRA:}$d";; esac
+  done
+  local AGENT_PATH="${EXTRA:+$EXTRA:}/usr/bin:/bin:/usr/sbin:/sbin"
+
   cat > "$PL" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.hyperpower.claudebar</string>
   <key>ProgramArguments</key>
-  <array><string>/bin/bash</string><string>$DIR/install.sh</string></array>
+  <array><string>/bin/bash</string><string>$STAGE/install.sh</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>$AGENT_PATH</string></dict>
   <key>RunAtLoad</key><true/>
   <key>StartInterval</key><integer>14400</integer>
   <key>StandardOutPath</key><string>/tmp/hyperpower-claudebar.log</string>
@@ -47,7 +77,7 @@ setup_agent(){
 EOF
   launchctl unload "$PL" 2>/dev/null || true
   launchctl load "$PL"  2>/dev/null || true
-  log "✅ auto-reapply LaunchAgent installed (re-checks at login + every 4h)"
+  log "✅ auto-reapply LaunchAgent installed (staged at $STAGE; PATH=$AGENT_PATH; re-checks at login + every 4h)"
 }
 
 # 0. claude-auto launcher (always; idempotent) -------------------------------

@@ -310,16 +310,45 @@ def find_activity_edit(data):
 
 
 def find_outcome_edit(data):
-    """Return (offset, old_bytes, new_bytes) wrapping the done-result in a JSON
-    pretty-printer before line-wrapping."""
+    """Return (offset, old_bytes, new_bytes) replacing the done-result initializer
+    with a JSON *viewer* (not just raw pretty-print):
+
+      - objects render one `key: value` per line, keys UNQUOTED, 2-space indent/depth
+      - booleans render as glyphs: true -> check (\\u2713), false -> cross (\\u2717)
+        so `accepted: true` reads `accepted: ✓`
+      - arrays render one `- item` per line; nested objects/arrays indent under a
+        bare `key:` / `-` header
+      - empty containers render `[]` / `{}` / `(empty)`
+
+    Falls back to the raw text when the payload is not JSON (parse throws or the
+    trimmed text does not start with `{`/`[`). Glyphs are literal \\uXXXX escapes
+    (raw UTF-8 mojibakes in this Bun bundle). Stays a single `let Y=(()=>{...})()`
+    IIFE so the downstream `nqo(Y,l)` line-wrap is untouched."""
     m = _find_one(OUT_RE, data, "OUTCOME")
     y, n, e = m.group(1), m.group(3), m.group(5)
     old = m.group(0)
     Y, N, E = y.decode("latin-1"), n.decode("latin-1"), e.decode("latin-1")
     new = (
-        "let " + Y + "=(()=>{let __r=" + N + '!=="loading"&&' + N + "?.finalText?" + N +
-        ".finalText:" + E + '.resultPreview??"";try{if(typeof __r==="string"){let __t=__r.trim();'
-        'if(__t[0]==="{"||__t[0]==="[")return JSON.stringify(JSON.parse(__t),null,2)}}catch(__e){}return __r})()'
+        "let " + Y + "=(()=>{"
+        "let __r=" + N + '!=="loading"&&' + N + "?.finalText?" + N +
+        ".finalText:" + E + '.resultPreview??"";'
+        'let __ck="\\u2713",__cx="\\u2717";'
+        'let __io=(v)=>v!==null&&typeof v==="object";'
+        'let __ne=(v)=>Array.isArray(v)?v.length>0:Object.keys(v).length>0;'
+        'let __sc=(v)=>v===null?"null":typeof v==="boolean"?(v?__ck:__cx):'
+        'typeof v==="string"?v:Array.isArray(v)?"[]":typeof v==="object"?"{}":String(v);'
+        'let __ln=(v,ind)=>{let pad="  ".repeat(ind),out=[];'
+        'if(Array.isArray(v)){if(!v.length){out.push(pad+"(empty)");return out}'
+        'for(let it of v){if(__io(it)&&__ne(it)){out.push(pad+"-");'
+        'for(let l of __ln(it,ind+1))out.push(l)}else out.push(pad+"- "+__sc(it))}}'
+        'else if(__io(v)){let ks=Object.keys(v);if(!ks.length){out.push(pad+"(empty)");return out}'
+        'for(let k of ks){let val=v[k];'
+        'if(__io(val)&&__ne(val)){out.push(pad+k+":");for(let l of __ln(val,ind+1))out.push(l)}'
+        'else out.push(pad+k+": "+__sc(val))}}'
+        'else out.push(pad+__sc(v));return out};'
+        'try{if(typeof __r==="string"){let __t=__r.trim();'
+        'if(__t[0]==="{"||__t[0]==="["){return __ln(JSON.parse(__t),0).join("\\n")}}}catch(__e){}'
+        "return __r})()"
     ).encode("latin-1")
     return m.start(), old, new
 
@@ -381,6 +410,16 @@ def build_bar_replacement(names, status_fn):
 
     js = (
         'let __st=' + state_expr + ',__bar;'
+        # Crash-vs-clean: a (codex) node that hit its usage/rate limit still
+        # *completes* (the subagent returns a schema), so state==="done" and the row
+        # would show a healthy full bar. Inspect the agent's result text for the
+        # deterministic Codex error markers (relayed verbatim from the codex CLI) and
+        # downgrade to "failed" so the row shows the cross. Bare "error" is NOT a
+        # marker (avoids false positives on prose that merely mentions errors).
+        'if(__st==="done"){let __rp=(e&&(e.resultPreview||e.finalText))||"";'
+        'if(typeof __rp==="string"&&'
+        '/usage limit|rate limit|codex exec returned ERROR|codex-not-installed|ERROR \\u2014 Codex/i'
+        '.test(__rp))__st="failed";}'
         'if(__st==="done")__bar="' + BAR_DONE + '";'
         'else if(__st==="failed")__bar="' + BAR_FAIL + '";'
         'else if(__st==="running"){'
@@ -746,7 +785,7 @@ def run(binary=None, out=None):
         try:
             out_off, out_old, out_new = find_outcome_edit(data4)
             syntax_check_js(out_new, "outcome")
-            print("  [4/4] OUTCOME json pretty-print (%+d)" % (len(out_new) - len(out_old)))
+            print("  [4/4] OUTCOME json viewer (glyph booleans) (%+d)" % (len(out_new) - len(out_old)))
             info4 = patch(tmp_out, tmp_out, out_off, out_old, out_new, C4, sign=False)
             total_delta += info4["delta"]
         except ReapplyError as e:
@@ -785,9 +824,11 @@ def run(binary=None, out=None):
                          b'Math.floor(Date.now()/250)%10' in final_bytes)
         badge_present = b'(via Codex)' in final_bytes and b'"Codex "+' in final_bytes
         act_present   = b'_Lo=99,' in final_bytes or b'=99,' in final_bytes
-        out_present   = b'JSON.stringify(JSON.parse(__t),null,2)' in final_bytes
+        out_present   = b'__ln(JSON.parse(__t),0)' in final_bytes
+        crash_present = b'codex exec returned ERROR' in final_bytes
         print("  bar:", bar_present, "| badge:", badge_present,
-              "| activity:", act_present, "| outcome:", out_present)
+              "| activity:", act_present, "| outcome:", out_present,
+              "| crash-detect:", crash_present)
 
         ok = (prc == 0 and pver == ver and sig.returncode == 0
               and bar_present and badge_present)
